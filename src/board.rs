@@ -90,6 +90,60 @@ impl Board {
         self.piece_at(square).is_none()
     }
 
+    /// Checks if the two kings are facing each other on the same file with no pieces in between
+    pub fn kings_facing(&self) -> bool {
+        let mut red_king_sq = None;
+        let mut black_king_sq = None;
+
+        // Black palace: coords (0,3) to (2,5)
+        for row in 0..=2 {
+            for col in 3..=5 {
+                let sq = Self::coord_to_square(row, col);
+                if let Some(piece) = self.piece_at(sq) {
+                    if piece.piece_type == PieceType::King {
+                        black_king_sq = Some(sq);
+                        break;
+                    }
+                }
+            }
+            if black_king_sq.is_some() { break; }
+        }
+
+        // Red palace: coords (7,3) to (9,5)
+        for row in 7..=9 {
+            for col in 3..=5 {
+                let sq = Self::coord_to_square(row, col);
+                if let Some(piece) = self.piece_at(sq) {
+                    if piece.piece_type == PieceType::King {
+                        red_king_sq = Some(sq);
+                        break;
+                    }
+                }
+            }
+            if red_king_sq.is_some() { break; }
+        }
+
+        if let (Some(r_sq), Some(b_sq)) = (red_king_sq, black_king_sq) {
+            let (r_row, r_col) = Self::square_to_coord(r_sq);
+            let (b_row, b_col) = Self::square_to_coord(b_sq);
+
+            if r_col == b_col {
+                let mut current = b_row + 1;
+                while current < r_row {
+                    let sq = Self::coord_to_square(current, r_col);
+                    if !self.is_empty(sq) {
+                        return false; // Blocked by a piece
+                    }
+                    current += 1;
+                }
+                // No pieces found between them
+                return true;
+            }
+        }
+        
+        false
+    }
+
     pub fn set_initial_position(&mut self) {
         self.squares = [None; 256];
         self.side_to_move = Color::Red;
@@ -136,5 +190,36 @@ impl Board {
         self.set_piece(Self::coord_to_square(6, 4), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 6), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 8), Some(Piece::new(Pawn, Red)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kings_facing() {
+        let mut board = Board::new();
+        
+        let red_king_sq = Board::coord_to_square(9, 4);
+        let black_king_sq = Board::coord_to_square(0, 4);
+        
+        board.set_piece(red_king_sq, Some(Piece::new(PieceType::King, Color::Red)));
+        board.set_piece(black_king_sq, Some(Piece::new(PieceType::King, Color::Black)));
+        
+        // Kings on the same file with no pieces in between -> facing
+        assert!(board.kings_facing());
+        
+        // Block the file with a piece
+        board.set_piece(Board::coord_to_square(5, 4), Some(Piece::new(PieceType::Pawn, Color::Red)));
+        assert!(!board.kings_facing());
+        
+        // Move one king to a different file
+        board.set_piece(black_king_sq, None);
+        board.set_piece(Board::coord_to_square(0, 3), Some(Piece::new(PieceType::King, Color::Black)));
+        
+        // Even without blockers, they are not on the same file -> not facing
+        board.set_piece(Board::coord_to_square(5, 4), None);
+        assert!(!board.kings_facing());
     }
 }

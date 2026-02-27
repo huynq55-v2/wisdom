@@ -58,7 +58,9 @@ impl Board {
             Some(target_piece) => {
                 if target_piece.color != self.side_to_move {
                     // Valid capture
-                    moves.push(Move::new(from, to, true));
+                    if only_captures {
+                        moves.push(Move::new(from, to, true));
+                    }
                 }
             }
             None => {
@@ -91,9 +93,10 @@ impl Board {
 
     fn gen_king_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for &offset in KING_ADVISOR_OFFSETS.iter() {
-            let to = (sq as isize + offset) as usize;
-            if Self::is_valid_square(to) && Self::is_in_palace(to, self.side_to_move) {
-                self.add_move_if_valid(sq, to, only_captures, moves);
+            if let Some(to) = sq.checked_add_signed(offset) {
+                if Self::is_valid_square(to) && Self::is_in_palace(to, self.side_to_move) {
+                    self.add_move_if_valid(sq, to, only_captures, moves);
+                }
             }
         }
         // "Flying King" logic is handled separately during make_move or facing-check
@@ -101,22 +104,24 @@ impl Board {
 
     fn gen_advisor_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for &offset in ADVISOR_DIAG_OFFSETS.iter() {
-            let to = (sq as isize + offset) as usize;
-            if Self::is_valid_square(to) && Self::is_in_palace(to, self.side_to_move) {
-                self.add_move_if_valid(sq, to, only_captures, moves);
+            if let Some(to) = sq.checked_add_signed(offset) {
+                if Self::is_valid_square(to) && Self::is_in_palace(to, self.side_to_move) {
+                    self.add_move_if_valid(sq, to, only_captures, moves);
+                }
             }
         }
     }
 
     fn gen_elephant_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for i in 0..4 {
-            let to = (sq as isize + ELEPHANT_OFFSETS[i]) as usize;
-            let eye = (sq as isize + ELEPHANT_EYES[i]) as usize;
-
-            if Self::is_valid_square(to) && Self::is_on_own_side(to, self.side_to_move) {
-                // Check if eye is blocked
-                if self.is_empty(eye) {
-                    self.add_move_if_valid(sq, to, only_captures, moves);
+            if let Some(to) = sq.checked_add_signed(ELEPHANT_OFFSETS[i]) {
+                if let Some(eye) = sq.checked_add_signed(ELEPHANT_EYES[i]) {
+                    if Self::is_valid_square(to) && Self::is_on_own_side(to, self.side_to_move) {
+                        // Check if eye is blocked
+                        if self.is_empty(eye) {
+                            self.add_move_if_valid(sq, to, only_captures, moves);
+                        }
+                    }
                 }
             }
         }
@@ -124,13 +129,14 @@ impl Board {
 
     fn gen_horse_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for i in 0..8 {
-            let to = (sq as isize + HORSE_JUMPS[i]) as usize;
-            let leg = (sq as isize + HORSE_LEGS[i]) as usize;
-
-            if Self::is_valid_square(to) {
-                // Check if the leg is blocked
-                if self.is_empty(leg) {
-                    self.add_move_if_valid(sq, to, only_captures, moves);
+            if let Some(to) = sq.checked_add_signed(HORSE_JUMPS[i]) {
+                if let Some(leg) = sq.checked_add_signed(HORSE_LEGS[i]) {
+                    if Self::is_valid_square(to) {
+                        // Check if the leg is blocked
+                        if self.is_empty(leg) {
+                            self.add_move_if_valid(sq, to, only_captures, moves);
+                        }
+                    }
                 }
             }
         }
@@ -138,8 +144,11 @@ impl Board {
 
     fn gen_rook_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for &dir in ROOK_CANNON_DIRS.iter() {
-            let mut current = (sq as isize + dir) as usize;
-            while Self::is_valid_square(current) {
+            let mut current_opt = sq.checked_add_signed(dir);
+            while let Some(current) = current_opt {
+                if !Self::is_valid_square(current) {
+                    break;
+                }
                 match self.piece_at(current) {
                     None => {
                         if !only_captures {
@@ -147,23 +156,26 @@ impl Board {
                         }
                     }
                     Some(piece) => {
-                        if piece.color != self.side_to_move {
+                        if piece.color != self.side_to_move && only_captures {
                             moves.push(Move::new(sq, current, true));
                         }
                         break; // Blocked by piece (own or enemy)
                     }
                 }
-                current = (current as isize + dir) as usize;
+                current_opt = current.checked_add_signed(dir);
             }
         }
     }
 
     fn gen_cannon_moves(&self, sq: usize, only_captures: bool, moves: &mut Vec<Move>) {
         for &dir in ROOK_CANNON_DIRS.iter() {
-            let mut current = (sq as isize + dir) as usize;
+            let mut current_opt = sq.checked_add_signed(dir);
             let mut jumped = false;
 
-            while Self::is_valid_square(current) {
+            while let Some(current) = current_opt {
+                if !Self::is_valid_square(current) {
+                    break;
+                }
                 match self.piece_at(current) {
                     None => {
                         if !jumped {
@@ -177,14 +189,14 @@ impl Board {
                             jumped = true; // First piece encountered acts as the mount
                         } else {
                             // Second piece encountered
-                            if piece.color != self.side_to_move {
+                            if piece.color != self.side_to_move && only_captures {
                                 moves.push(Move::new(sq, current, true));
                             }
                             break; // Cannot jump over two pieces
                         }
                     }
                 }
-                current = (current as isize + dir) as usize;
+                current_opt = current.checked_add_signed(dir);
             }
         }
     }
@@ -193,17 +205,19 @@ impl Board {
         let forward_dir = if color == Color::Red { -16 } else { 16 };
         
         // Forward move
-        let forward_to = (sq as isize + forward_dir) as usize;
-        if Self::is_valid_square(forward_to) {
-            self.add_move_if_valid(sq, forward_to, only_captures, moves);
+        if let Some(forward_to) = sq.checked_add_signed(forward_dir) {
+            if Self::is_valid_square(forward_to) {
+                self.add_move_if_valid(sq, forward_to, only_captures, moves);
+            }
         }
 
         // Sideways moves (only if crossed river)
         if !Self::is_on_own_side(sq, color) {
-            for &side_dir in &[1, -1] {
-                let side_to = (sq as isize + side_dir) as usize;
-                if Self::is_valid_square(side_to) {
-                    self.add_move_if_valid(sq, side_to, only_captures, moves);
+            for &side_dir in &[1isize, -1] {
+                if let Some(side_to) = sq.checked_add_signed(side_dir) {
+                    if Self::is_valid_square(side_to) {
+                        self.add_move_if_valid(sq, side_to, only_captures, moves);
+                    }
                 }
             }
         }
