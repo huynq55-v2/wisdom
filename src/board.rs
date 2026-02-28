@@ -26,6 +26,20 @@ pub enum PieceType {
     Pawn,    // Tốt
 }
 
+impl PieceType {
+    pub const fn value(&self) -> i32 {
+        match self {
+            PieceType::Pawn => 100,
+            PieceType::Advisor => 200,
+            PieceType::Elephant => 200,
+            PieceType::Horse => 400,
+            PieceType::Cannon => 450,
+            PieceType::Rook => 900,
+            PieceType::King => 10000,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Piece {
     pub piece_type: PieceType,
@@ -36,6 +50,23 @@ impl Piece {
     pub const fn new(piece_type: PieceType, color: Color) -> Self {
         Self { piece_type, color }
     }
+
+    pub const fn zobrist_index(&self) -> usize {
+        let base = match self.piece_type {
+            PieceType::Pawn => 0,
+            PieceType::Advisor => 1,
+            PieceType::Elephant => 2,
+            PieceType::Horse => 3,
+            PieceType::Cannon => 4,
+            PieceType::Rook => 5,
+            PieceType::King => 6,
+        };
+        if matches!(self.color, Color::Black) {
+            base + 7
+        } else {
+            base
+        }
+    }
 }
 
 // 0x88 method but adjusted for Xiangqi 10x9 board
@@ -44,10 +75,11 @@ impl Piece {
 // However, since we need 10 rows, a u8 is perfectly fine (max index 16*9+8 = 152).
 // To keep things simple and power-of-2 aligned, we use an array of size 256.
 pub struct Board {
-    squares: [Option<Piece>; 256],
+    pub squares: [Option<Piece>; 256],
     pub side_to_move: Color,
     pub red_king_sq: usize,
     pub black_king_sq: usize,
+    pub zobrist_key: u64,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -55,6 +87,7 @@ pub struct UndoInfo {
     pub captured_piece: Option<Piece>,
     pub previous_red_king_sq: usize,
     pub previous_black_king_sq: usize,
+    pub previous_zobrist_key: u64,
 }
 
 impl Board {
@@ -64,7 +97,22 @@ impl Board {
             side_to_move: Color::Red,
             red_king_sq: 0,
             black_king_sq: 0,
+            zobrist_key: 0,
         }
+    }
+
+    pub fn compute_zobrist_key(&mut self) -> u64 {
+        let mut key = 0;
+        for sq in 0..256 {
+            if let Some(piece) = self.piece_at(sq) {
+                key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][sq];
+            }
+        }
+        if self.side_to_move == Color::Black {
+            key ^= crate::zobrist::ZOBRIST.side;
+        }
+        self.zobrist_key = key;
+        key
     }
 
     /// Checks if a square index is strictly within the 10x9 board boundaries.
@@ -207,15 +255,7 @@ impl Board {
         for sq in 0..256 {
             if let Some(piece) = self.piece_at(sq) {
                 // Basic Material Values
-                let mut piece_val = match piece.piece_type {
-                    PieceType::Pawn => 100,
-                    PieceType::Advisor => 200,
-                    PieceType::Elephant => 200,
-                    PieceType::Horse => 400,
-                    PieceType::Cannon => 450,
-                    PieceType::Rook => 900,
-                    PieceType::King => 10000,
-                };
+                let mut piece_val = piece.piece_type.value();
 
                 // Bonus for Pawns crossing the river
                 if piece.piece_type == PieceType::Pawn {
@@ -246,7 +286,17 @@ impl Board {
             captured_piece: captured,
             previous_red_king_sq: self.red_king_sq,
             previous_black_king_sq: self.black_king_sq,
+            previous_zobrist_key: self.zobrist_key,
         };
+
+        // Remove moving piece from 'from' and add it to 'to' in the hash
+        self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][from];
+        self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][to];
+        
+        // Remove captured piece from the hash
+        if let Some(cap) = captured {
+            self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[cap.zobrist_index()][to];
+        }
 
         // Move piece
         self.set_piece(to, Some(piece));
@@ -262,6 +312,8 @@ impl Board {
         }
 
         self.side_to_move = self.side_to_move.opposite();
+        self.zobrist_key ^= crate::zobrist::ZOBRIST.side;
+        
         undo
     }
 
@@ -279,6 +331,9 @@ impl Board {
         // Restore king positions
         self.red_king_sq = undo.previous_red_king_sq;
         self.black_king_sq = undo.previous_black_king_sq;
+
+        // Restore zobrist
+        self.zobrist_key = undo.previous_zobrist_key;
 
         // Restore side to move
         self.side_to_move = self.side_to_move.opposite();
@@ -332,6 +387,8 @@ impl Board {
         self.set_piece(Self::coord_to_square(6, 4), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 6), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 8), Some(Piece::new(Pawn, Red)));
+        
+        self.compute_zobrist_key();
     }
 }
 

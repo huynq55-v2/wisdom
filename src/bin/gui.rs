@@ -172,7 +172,8 @@ async fn main() {
                 if all_moves.is_empty() {
                     game_over = true;
                 } else {
-                    let best_move = search_best_move(&mut board, 4);
+                    let mut tt = wisdom::tt::TranspositionTable::new(64);
+                    let best_move = search_best_move(&mut board, 4, &mut tt);
                     board.make_move(best_move);
                 }
             }

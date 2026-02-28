@@ -98,11 +98,14 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
     if parts.len() > 1 {
         board.side_to_move = if parts[1] == "b" || parts[1] == "B" { Color::Black } else { Color::Red };
     }
+    board.compute_zobrist_key();
 }
 
 pub fn ucci_loop() {
     let mut board = Board::new();
     board.set_initial_position();
+
+    let mut tt = crate::tt::TranspositionTable::new(64);
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -144,14 +147,14 @@ pub fn ucci_loop() {
                 }
             }
             "go" => {
-                let mut depth = 4; // default
-                if tokens.len() > 2 && tokens[1] == "depth" {
-                    depth = tokens[2].parse().unwrap_or(4);
-                }
+        let mut depth = 4; // default
+        if tokens.len() > 2 && tokens[1] == "depth" {
+            depth = tokens[2].parse().unwrap_or(4);
+        }
 
-                let best_move = search_best_move(&mut board, depth);
-                let move_str = move_to_ucci_string(best_move);
-                println!("bestmove {}", move_str);
+        let best_move = search_best_move(&mut board, depth, &mut tt);
+        let move_str = move_to_ucci_string(best_move);
+        println!("bestmove {}", move_str);
             }
             "eval" => {
                 println!("info eval {}", board.evaluate());
