@@ -2,19 +2,20 @@ mod board;
 mod r#move;
 mod movegen;
 mod perft;
-
-use board::Board;
+mod search;
+mod ucci;
 
 fn main() {
-    let mut board = Board::new();
-    board.set_initial_position();
-
-    let quiets = board.generate_quiets();
-    let captures = board.generate_captures();
-
-    println!("Initial Board Setup Complete.");
-    println!("Number of possible quiet moves: {}", quiets.len());
-    println!("Number of possible capture moves: {}", captures.len());
-
-    // Basic perft/visualization can be added here
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "perft" {
+        // Run perft test if desired
+        let mut board = board::Board::new();
+        board.set_initial_position();
+        let depth = if args.len() > 2 { args[2].parse().unwrap_or(4) } else { 4 };
+        let nodes = perft::perft(&mut board, depth);
+        println!("Perft depth {} : {} nodes", depth, nodes);
+    } else {
+        // Default to UCCI mode
+        ucci::ucci_loop();
+    }
 }

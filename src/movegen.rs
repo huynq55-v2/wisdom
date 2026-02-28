@@ -72,7 +72,7 @@ impl Board {
         }
     }
 
-    fn is_in_palace(sq: usize, color: Color) -> bool {
+    pub fn is_in_palace(sq: usize, color: Color) -> bool {
         let (row, col) = Self::square_to_coord(sq);
         if col < 3 || col > 5 {
             return false;
@@ -83,7 +83,7 @@ impl Board {
         }
     }
 
-    fn is_on_own_side(sq: usize, color: Color) -> bool {
+    pub fn is_on_own_side(sq: usize, color: Color) -> bool {
         let (row, _col) = Self::square_to_coord(sq);
         match color {
             Color::Black => row <= 4,

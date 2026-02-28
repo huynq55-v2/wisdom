@@ -198,6 +198,44 @@ impl Board {
         false
     }
 
+    /// Evaluates the current board state.
+    /// Returns a positive score if `side_to_move` has the advantage.
+    /// Returns a negative score if `side_to_move` is at a disadvantage.
+    pub fn evaluate(&self) -> i32 {
+        let mut score = 0;
+
+        for sq in 0..256 {
+            if let Some(piece) = self.piece_at(sq) {
+                // Basic Material Values
+                let mut piece_val = match piece.piece_type {
+                    PieceType::Pawn => 100,
+                    PieceType::Advisor => 200,
+                    PieceType::Elephant => 200,
+                    PieceType::Horse => 400,
+                    PieceType::Cannon => 450,
+                    PieceType::Rook => 900,
+                    PieceType::King => 10000,
+                };
+
+                // Bonus for Pawns crossing the river
+                if piece.piece_type == PieceType::Pawn {
+                    if !Self::is_on_own_side(sq, piece.color) {
+                        piece_val += 100; // Double value for crossed pawn
+                    }
+                }
+
+                // Add to score if it's our piece, subtract if opponent's
+                if piece.color == self.side_to_move {
+                    score += piece_val;
+                } else {
+                    score -= piece_val;
+                }
+            }
+        }
+        
+        score
+    }
+
     pub fn make_move(&mut self, m: Move) -> UndoInfo {
         let from = m.from_sq();
         let to = m.to_sq();
