@@ -1,5 +1,5 @@
 use macroquad::prelude::*;
-use wisdom::board::{Board, Color as PieceColor, Piece, PieceType};
+use wisdom::board::{Board, Color as PieceColor, PieceType};
 use wisdom::r#move::Move;
 use wisdom::search::search_best_move;
 
@@ -7,6 +7,12 @@ const SQUARE_SIZE: f32 = 60.0;
 const OFFSET_X: f32 = 50.0;
 const OFFSET_Y: f32 = 50.0;
 const RADIUS: f32 = 25.0;
+
+#[derive(PartialEq)]
+enum GameMode {
+    EngineVsPlayer,
+    EngineVsEngine,
+}
 
 fn get_legal_moves(board: &mut Board) -> Vec<Move> {
     let mut moves = board.generate_captures();
@@ -48,14 +54,26 @@ fn draw_board() {
     
     draw_line(OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y + 7.0 * SQUARE_SIZE, OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y + 9.0 * SQUARE_SIZE, 2.0, BLACK);
     draw_line(OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y + 7.0 * SQUARE_SIZE, OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y + 9.0 * SQUARE_SIZE, 2.0, BLACK);
+
+    // Draw "River" text (optional, simple decorative text)
+    draw_text("楚 河             漢 界", OFFSET_X + 1.5 * SQUARE_SIZE, OFFSET_Y + 4.6 * SQUARE_SIZE, 30.0, BLACK);
 }
 
-fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move]) {
+fn display_row(r: usize, human_color: PieceColor) -> usize {
+    if human_color == PieceColor::Red { r } else { 9 - r }
+}
+fn display_col(c: usize, human_color: PieceColor) -> usize {
+    if human_color == PieceColor::Red { c } else { 8 - c }
+}
+
+fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move], human_color: PieceColor) {
     for row in 0..10 {
         for col in 0..9 {
             let sq = Board::coord_to_square(row, col);
-            let x = OFFSET_X + col as f32 * SQUARE_SIZE;
-            let y = OFFSET_Y + row as f32 * SQUARE_SIZE;
+            let d_row = display_row(row, human_color);
+            let d_col = display_col(col, human_color);
+            let x = OFFSET_X + d_col as f32 * SQUARE_SIZE;
+            let y = OFFSET_Y + d_row as f32 * SQUARE_SIZE;
 
             // Highlight selected square
             if Some(sq) == selected_sq {
@@ -88,11 +106,28 @@ fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move]) 
     }
 }
 
+fn draw_button(text: &str, x: f32, y: f32, w: f32, h: f32, active: bool, color: Color) -> bool {
+    let bg_color = if active { GREEN } else { color };
+    draw_rectangle(x, y, w, h, bg_color);
+    draw_rectangle_lines(x, y, w, h, 2.0, BLACK);
+    
+    let text_size = measure_text(text, None, 20, 1.0);
+    draw_text(text, x + (w - text_size.width) / 2.0, y + (h + text_size.height) / 2.0, 20.0, WHITE);
+    
+    if is_mouse_button_pressed(MouseButton::Left) {
+        let (mx, my) = mouse_position();
+        if mx >= x && mx <= x + w && my >= y && my <= y + h {
+            return true;
+        }
+    }
+    false
+}
+
 // Window conf
 fn window_conf() -> Conf {
     Conf {
         window_title: "Wisdom Engine - Xiangqi".to_owned(),
-        window_width: 600,
+        window_width: 900, // Widened for control panel
         window_height: 700,
         ..Default::default()
     }
@@ -103,43 +138,143 @@ async fn main() {
     let mut board = Board::new();
     board.set_initial_position();
 
+    let mut tt = wisdom::tt::TranspositionTable::new(64);
+
     let mut selected_sq: Option<usize> = None;
     let mut legal_moves = Vec::new();
     let mut game_over = false;
 
-    // We play as Red (bottom)
-    let human_color = PieceColor::Red;
+    // UI State
+    let mut game_mode = GameMode::EngineVsPlayer;
+    let mut human_color = PieceColor::Red; // Red is bottom by default
+    let mut search_depth: u8 = 4;
+    let mut current_eval: Option<i32> = Some(board.evaluate());
 
     loop {
         draw_board();
-        draw_pieces(&board, selected_sq, &legal_moves);
+        draw_pieces(&board, selected_sq, &legal_moves, human_color);
 
+        // --- DRAW CONTROL PANEL ---
+        let panel_x = 620.0;
+        let mut py = OFFSET_Y;
+
+        draw_text("Controls", panel_x, py, 30.0, BLACK);
+        py += 40.0;
+
+        // Reset Button
+        if draw_button("Reset Game", panel_x, py, 200.0, 40.0, false, BLUE) {
+            board.set_initial_position();
+            tt = wisdom::tt::TranspositionTable::new(64);
+            selected_sq = None;
+            legal_moves.clear();
+            game_over = false;
+            current_eval = Some(board.evaluate());
+        }
+        py += 60.0;
+
+        // Game Mode Toggle
+        draw_text("Game Mode:", panel_x, py, 20.0, BLACK);
+        py += 25.0;
+        if draw_button("Engine vs Player", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsPlayer, GRAY) {
+            game_mode = GameMode::EngineVsPlayer;
+            board.set_initial_position();
+            selected_sq = None;
+            legal_moves.clear();
+            game_over = false;
+            current_eval = Some(board.evaluate());
+        }
+        py += 40.0;
+        if draw_button("Engine vs Engine", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsEngine, GRAY) {
+            game_mode = GameMode::EngineVsEngine;
+            board.set_initial_position();
+            selected_sq = None;
+            legal_moves.clear();
+            game_over = false;
+            current_eval = Some(board.evaluate());
+        }
+        py += 40.0;
+
+        // Side Selection (Only Engine vs Player)
+        if game_mode == GameMode::EngineVsPlayer {
+            draw_text("Player Side:", panel_x, py, 20.0, BLACK);
+            py += 25.0;
+            if draw_button("Play Red", panel_x, py, 80.0, 30.0, human_color == PieceColor::Red, GRAY) {
+                human_color = PieceColor::Red;
+                board.set_initial_position();
+                selected_sq = None;
+                legal_moves.clear();
+                game_over = false;
+                current_eval = Some(board.evaluate());
+            }
+            if draw_button("Play Black", panel_x + 90.0, py, 90.0, 30.0, human_color == PieceColor::Black, GRAY) {
+                human_color = PieceColor::Black;
+                board.set_initial_position();
+                selected_sq = None;
+                legal_moves.clear();
+                game_over = false;
+                current_eval = Some(board.evaluate());
+            }
+            py += 40.0;
+        }
+
+        // Search Depth
+        draw_text(&format!("Depth: {}", search_depth), panel_x, py, 20.0, BLACK);
+        py += 25.0;
+        if draw_button("-", panel_x, py, 40.0, 30.0, false, GRAY) {
+            if search_depth > 1 { search_depth -= 1; }
+        }
+        if draw_button("+", panel_x + 50.0, py, 40.0, 30.0, false, GRAY) {
+            if search_depth < 10 { search_depth += 1; }
+        }
+        py += 50.0;
+
+        // Eval Display
+        if game_mode == GameMode::EngineVsEngine || (game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color) {
+            if let Some(eval) = current_eval {
+                draw_text(&format!("Eval: {}", eval), panel_x, py, 30.0, match eval {
+                    e if e > 500 => DARKGREEN,
+                    e if e < -500 => MAROON,
+                    _ => BLACK
+                });
+            }
+        }
+        py += 50.0;
+
+        if game_over {
+            draw_text("GAME OVER", OFFSET_X, OFFSET_Y / 2.0, 50.0, RED);
+        }
+        
+        // --- GAME LOGIC ---
         if !game_over {
-            if board.side_to_move == human_color {
-                // Human turn
+            let is_human_turn = game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color;
+
+            if is_human_turn {
+                // Human Turn handling
                 if is_mouse_button_pressed(MouseButton::Left) {
                     let (mx, my) = mouse_position();
-                    let col = ((mx - OFFSET_X + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
-                    let row = ((my - OFFSET_Y + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
+                    let d_col = ((mx - OFFSET_X + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
+                    let d_row = ((my - OFFSET_Y + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
 
-                    if col >= 0 && col < 9 && row >= 0 && row < 10 {
-                        let sq = Board::coord_to_square(row as usize, col as usize);
+                    if d_col >= 0 && d_col < 9 && d_row >= 0 && d_row < 10 {
+                        let c = if human_color == PieceColor::Red { d_col as usize } else { 8 - (d_col as usize) };
+                        let r = if human_color == PieceColor::Red { d_row as usize } else { 9 - (d_row as usize) };
+                        let sq = Board::coord_to_square(r, c);
 
-                        if let Some(selected) = selected_sq {
+                        if selected_sq.is_some() {
                             // Try to execute move
                             if let Some(&m) = legal_moves.iter().find(|m| m.to_sq() == sq) {
                                 board.make_move(m);
                                 selected_sq = None;
                                 legal_moves.clear();
+                                let all = get_legal_moves(&mut board);
+                                if all.is_empty() { game_over = true; }
+                                current_eval = Some(board.evaluate());
                             } else {
                                 // Select another piece if valid
                                 if let Some(piece) = board.piece_at(sq) {
                                     if piece.color == human_color {
                                         selected_sq = Some(sq);
-                                        legal_moves = get_legal_moves(&mut board)
-                                            .into_iter()
-                                            .filter(|m| m.from_sq() == sq)
-                                            .collect();
+                                        legal_moves = get_legal_moves(&mut board).into_iter().filter(|m| m.from_sq() == sq).collect();
                                     } else {
                                         selected_sq = None;
                                         legal_moves.clear();
@@ -154,31 +289,29 @@ async fn main() {
                             if let Some(piece) = board.piece_at(sq) {
                                 if piece.color == human_color {
                                     selected_sq = Some(sq);
-                                    legal_moves = get_legal_moves(&mut board)
-                                        .into_iter()
-                                        .filter(|m| m.from_sq() == sq)
-                                        .collect();
+                                    legal_moves = get_legal_moves(&mut board).into_iter().filter(|m| m.from_sq() == sq).collect();
                                 }
                             }
                         }
                     }
                 }
             } else {
-                // Engine turn
-                // Wait for a frame to render human's move
-                next_frame().await;
+                // Engine Turn handling
+                next_frame().await; // render human move or previous frame
                 
                 let all_moves = get_legal_moves(&mut board);
                 if all_moves.is_empty() {
                     game_over = true;
                 } else {
-                    let mut tt = wisdom::tt::TranspositionTable::new(64);
-                    let best_move = search_best_move(&mut board, 4, &mut tt);
+                    let best_move = search_best_move(&mut board, search_depth, &mut tt);
                     board.make_move(best_move);
+                    current_eval = Some(board.evaluate());
+                    
+                    if get_legal_moves(&mut board).is_empty() {
+                        game_over = true;
+                    }
                 }
             }
-        } else {
-            draw_text("GAME OVER", OFFSET_X, OFFSET_Y / 2.0, 50.0, RED);
         }
 
         next_frame().await
