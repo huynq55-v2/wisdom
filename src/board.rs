@@ -246,6 +246,18 @@ impl Board {
         false
     }
 
+    /// Determines quickly if a given pseudo-legal move delivers a check.
+    /// This is used heavily in Mate Search.
+    pub fn is_checking_move(&mut self, m: Move) -> bool {
+        let side = self.side_to_move;
+        
+        let undo = self.make_move(m);
+        let checks = self.is_in_check(side.opposite());
+        self.unmake_move(m, undo);
+        
+        checks
+    }
+
     /// Evaluates the current board state.
     /// Returns a positive score if `side_to_move` has the advantage.
     /// Returns a negative score if `side_to_move` is at a disadvantage.

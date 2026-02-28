@@ -54,12 +54,12 @@ impl TranspositionTable {
                     FLAG_EXACT => return Some((entry.score, entry.best_move)),
                     FLAG_ALPHA => {
                         if entry.score <= alpha {
-                            return Some((alpha, entry.best_move));
+                            return Some((entry.score, entry.best_move));
                         }
                     }
                     FLAG_BETA => {
                         if entry.score >= beta {
-                            return Some((beta, entry.best_move));
+                            return Some((entry.score, entry.best_move));
                         }
                     }
                     _ => {}
