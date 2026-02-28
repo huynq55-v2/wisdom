@@ -44,22 +44,29 @@ impl TranspositionTable {
         }
     }
 
-    pub fn probe(&self, key: u64, depth: u8, alpha: i32, beta: i32) -> Option<(i32, Option<Move>)> {
+    pub fn probe(&self, key: u64, depth: u8, ply: u8, alpha: i32, beta: i32) -> Option<(i32, Option<Move>)> {
         let index = (key as usize) & self.mask;
         let entry = &self.entries[index];
 
         if entry.key == key {
             if entry.depth >= depth {
+                let mut return_score = entry.score;
+                if return_score > crate::search::MATE_VALUE - 100 {
+                    return_score -= ply as i32;
+                } else if return_score < -crate::search::MATE_VALUE + 100 {
+                    return_score += ply as i32;
+                }
+
                 match entry.flag {
-                    FLAG_EXACT => return Some((entry.score, entry.best_move)),
+                    FLAG_EXACT => return Some((return_score, entry.best_move)),
                     FLAG_ALPHA => {
-                        if entry.score <= alpha {
-                            return Some((entry.score, entry.best_move));
+                        if return_score <= alpha {
+                            return Some((return_score, entry.best_move));
                         }
                     }
                     FLAG_BETA => {
-                        if entry.score >= beta {
-                            return Some((entry.score, entry.best_move));
+                        if return_score >= beta {
+                            return Some((return_score, entry.best_move));
                         }
                     }
                     _ => {}
@@ -72,12 +79,20 @@ impl TranspositionTable {
         None
     }
 
-    pub fn record(&mut self, key: u64, depth: u8, score: i32, flag: u8, best_move: Option<Move>) {
+    pub fn record(&mut self, key: u64, depth: u8, ply: u8, score: i32, flag: u8, best_move: Option<Move>) {
         let index = (key as usize) & self.mask;
+        
+        let mut store_score = score;
+        if store_score > crate::search::MATE_VALUE - 100 {
+            store_score += ply as i32;
+        } else if store_score < -crate::search::MATE_VALUE + 100 {
+            store_score -= ply as i32;
+        }
+
         // Simple replace scheme
         self.entries[index] = TTEntry {
             key,
-            score,
+            score: store_score,
             depth,
             flag,
             best_move,

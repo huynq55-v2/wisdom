@@ -1,8 +1,8 @@
 use crate::board::Board;
 use crate::r#move::Move;
 
-const INFINITY: i32 = 50000;
-const MATE_VALUE: i32 = 20000;
+pub const INFINITY: i32 = 50000;
+pub const MATE_VALUE: i32 = 20000;
 
 use std::time::{Instant, Duration};
 
@@ -20,7 +20,7 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
     let beta = INFINITY;
 
     let mut tt_move = None;
-    if let Some((_score, best_tt)) = tt.probe(board.zobrist_key, depth, alpha, beta) {
+    if let Some((_score, best_tt)) = tt.probe(board.zobrist_key, depth, 0, alpha, beta) {
         tt_move = best_tt;
     }
 
@@ -47,7 +47,7 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
             continue;
         }
 
-        let score = -negamax(board, depth - 1, -beta, -alpha, tt);
+        let score = -negamax(board, depth - 1, 1, -beta, -alpha, tt);
         board.unmake_move(*m, undo);
 
         if score > alpha {
@@ -57,13 +57,13 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
     }
 
     if let Some(bm) = best_move {
-        tt.record(board.zobrist_key, depth, alpha, crate::tt::FLAG_EXACT, Some(bm));
+        tt.record(board.zobrist_key, depth, 0, alpha, crate::tt::FLAG_EXACT, Some(bm));
     }
 
     best_move.unwrap_or(moves[0]) // Fallback
 }
 
-fn negamax(board: &mut Board, depth: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable) -> i32 {
+fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable) -> i32 {
     let orig_alpha = alpha;
 
     if depth == 0 {
@@ -71,7 +71,7 @@ fn negamax(board: &mut Board, depth: u8, mut alpha: i32, beta: i32, tt: &mut cra
     }
 
     let mut tt_move = None;
-    if let Some((score, best_tt)) = tt.probe(board.zobrist_key, depth, alpha, beta) {
+    if let Some((score, best_tt)) = tt.probe(board.zobrist_key, depth, ply, alpha, beta) {
         if score != i32::MIN {
             return score;
         }
@@ -104,7 +104,7 @@ fn negamax(board: &mut Board, depth: u8, mut alpha: i32, beta: i32, tt: &mut cra
         }
 
         has_legal_moves = true;
-        let score = -negamax(board, depth - 1, -beta, -alpha, tt);
+        let score = -negamax(board, depth - 1, ply + 1, -beta, -alpha, tt);
         board.unmake_move(*m, undo);
 
         if score > best_score {
@@ -122,7 +122,7 @@ fn negamax(board: &mut Board, depth: u8, mut alpha: i32, beta: i32, tt: &mut cra
     if !has_legal_moves {
         // If in check -> Checkmate
         // If not in check -> Stalemate (also loss in Xiangqi)
-        return -MATE_VALUE + (100 - depth as i32);
+        return -MATE_VALUE + ply as i32;
     }
 
     let flag = if best_score <= orig_alpha {
@@ -133,7 +133,7 @@ fn negamax(board: &mut Board, depth: u8, mut alpha: i32, beta: i32, tt: &mut cra
         crate::tt::FLAG_EXACT
     };
 
-    tt.record(board.zobrist_key, depth, best_score, flag, best_move);
+    tt.record(board.zobrist_key, depth, ply, best_score, flag, best_move);
 
     best_score
 }
@@ -218,7 +218,7 @@ pub fn find_mate(
             continue;
         }
 
-        let score = -mate_search(board, depth - 1, -beta, -alpha, tt, start_time, timeout);
+        let score = -mate_search(board, depth - 1, 1, -beta, -alpha, tt, start_time, timeout);
         board.unmake_move(*m, undo);
 
         // If timed out, return None
@@ -247,6 +247,7 @@ pub fn find_mate(
 fn mate_search(
     board: &mut Board, 
     depth: u8, 
+    ply: u8,
     mut alpha: i32, 
     beta: i32, 
     tt: &mut crate::tt::TranspositionTable, 
@@ -263,7 +264,7 @@ fn mate_search(
         return board.evaluate(); // Only eval when depths runs out without mate
     }
 
-    if let Some((score, _best_tt)) = tt.probe(board.zobrist_key, depth, alpha, beta) {
+    if let Some((score, _best_tt)) = tt.probe(board.zobrist_key, depth, ply, alpha, beta) {
         if score != i32::MIN {
             return score;
         }
@@ -308,7 +309,7 @@ fn mate_search(
         }
 
         has_legal_moves = true;
-        let score = -mate_search(board, depth - 1, -beta, -alpha, tt, start_time, timeout);
+        let score = -mate_search(board, depth - 1, ply + 1, -beta, -alpha, tt, start_time, timeout);
         board.unmake_move(*m, undo);
 
         if score > best_score {
@@ -325,10 +326,10 @@ fn mate_search(
 
     if !has_legal_moves {
         if in_check {
-            return -MATE_VALUE + (100 - depth as i32);
+            return -MATE_VALUE + ply as i32;
         } else {
             // Stalemate
-            return -MATE_VALUE + (100 - depth as i32);
+            return -MATE_VALUE + ply as i32;
         }
     }
 
@@ -341,7 +342,7 @@ fn mate_search(
     };
 
     if start_time.elapsed() <= timeout {
-        tt.record(board.zobrist_key, depth, best_score, flag, best_move);
+        tt.record(board.zobrist_key, depth, ply, best_score, flag, best_move);
     }
 
     best_score

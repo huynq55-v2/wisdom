@@ -267,8 +267,12 @@ async fn main() {
                                 selected_sq = None;
                                 legal_moves.clear();
                                 let all = get_legal_moves(&mut board);
-                                if all.is_empty() { game_over = true; }
-                                current_eval = Some(board.evaluate());
+                                if all.is_empty() { 
+                                    game_over = true;
+                                    current_eval = Some(-20000); 
+                                } else {
+                                    current_eval = Some(board.evaluate());
+                                }
                             } else {
                                 // Select another piece if valid
                                 if let Some(piece) = board.piece_at(sq) {
@@ -302,13 +306,16 @@ async fn main() {
                 let all_moves = get_legal_moves(&mut board);
                 if all_moves.is_empty() {
                     game_over = true;
+                    current_eval = Some(-20000); // Current player has no moves (mated)
                 } else {
                     let best_move = search_best_move(&mut board, search_depth, &mut tt);
                     board.make_move(best_move);
-                    current_eval = Some(board.evaluate());
                     
                     if get_legal_moves(&mut board).is_empty() {
                         game_over = true;
+                        current_eval = Some(20000); // Opposite player has no moves
+                    } else {
+                        current_eval = Some(board.evaluate());
                     }
                 }
             }
