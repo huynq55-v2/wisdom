@@ -340,7 +340,9 @@ fn mate_search(
         crate::tt::FLAG_EXACT
     };
 
-    tt.record(board.zobrist_key, depth, best_score, flag, best_move);
+    if start_time.elapsed() <= timeout {
+        tt.record(board.zobrist_key, depth, best_score, flag, best_move);
+    }
 
     best_score
 }
