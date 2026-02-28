@@ -1,6 +1,7 @@
 mod board;
 mod r#move;
 mod movegen;
+mod perft;
 
 use board::Board;
 
