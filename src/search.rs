@@ -1,14 +1,12 @@
-use crate::board::Board;
+use crate::board::{Board, HistoryEntry, RepetitionResult};
 use crate::r#move::Move;
 
 pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
-use std::time::{Instant, Duration};
-
 pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::TranspositionTable) -> Move {
+    let mut history = Vec::with_capacity(128);
     // Standard Negamax Search
-    let start_time = Instant::now();
     let mut best_move = None;
     let mut alpha = -INFINITY;
     let beta = INFINITY;
@@ -34,6 +32,10 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
     let moving_side = board.side_to_move;
 
     for m in &moves {
+        let is_capture = !board.is_empty(m.to_sq());
+        let piece = board.piece_at(m.from_sq()).unwrap();
+        let is_reversible = !is_capture && piece.piece_type != crate::board::PieceType::Pawn;
+
         let undo = board.make_move(*m);
 
         if board.kings_facing() || board.is_in_check(moving_side) {
@@ -41,13 +43,25 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
             continue;
         }
 
-        // Check Extension logic: if this move gives check, we don't reduce depth.
-        // As a safeguard against infinite checking loops, we only extend up to a reasonable bound relative to original depth (e.g. + 4)
-        // For simplicity in this base implementation, we extend if giving check, but cap the max depth to avoid blowups.
-        let gives_check = board.is_checking_move(*m);
+        let gives_check = board.is_in_check(moving_side.opposite());
         let next_depth = if gives_check { depth } else { depth - 1 };
 
-        let score = -negamax(board, next_depth, 1, -beta, -alpha, tt);
+        let chased_set = if is_reversible && !gives_check {
+            board.get_chased_set()
+        } else {
+            0
+        };
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set,
+            is_reversible,
+        });
+
+        let score = -negamax(board, next_depth, 1, -beta, -alpha, tt, &mut history);
+
+        history.pop();
         board.unmake_move(*m, undo);
 
         if score > alpha {
@@ -63,7 +77,15 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
     best_move.unwrap_or(moves[0]) // Fallback
 }
 
-fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable) -> i32 {
+fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable, history: &mut Vec<HistoryEntry>) -> i32 {
+    
+    match board.judge_repetition(history, ply as usize) {
+        RepetitionResult::Win => return MATE_VALUE - ply as i32,
+        RepetitionResult::Loss => return -MATE_VALUE + ply as i32,
+        RepetitionResult::Draw => return 0,
+        RepetitionResult::Undecided => {}
+    }
+
     let orig_alpha = alpha;
 
     if depth == 0 {
@@ -96,6 +118,10 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
     let mut has_legal_moves = false;
 
     for m in &moves {
+        let is_capture = !board.is_empty(m.to_sq());
+        let piece = board.piece_at(m.from_sq()).unwrap();
+        let is_reversible = !is_capture && piece.piece_type != crate::board::PieceType::Pawn;
+
         let undo = board.make_move(*m);
 
         if board.kings_facing() || board.is_in_check(moving_side) {
@@ -105,10 +131,25 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
 
         has_legal_moves = true;
 
-        let gives_check = board.is_checking_move(*m);
+        let gives_check = board.is_in_check(moving_side.opposite());
         let next_depth = if gives_check { depth } else { depth - 1 };
 
-        let score = -negamax(board, next_depth, ply + 1, -beta, -alpha, tt);
+        let chased_set = if is_reversible && !gives_check {
+            board.get_chased_set()
+        } else {
+            0
+        };
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set,
+            is_reversible,
+        });
+
+        let score = -negamax(board, next_depth, ply + 1, -beta, -alpha, tt, history);
+
+        history.pop();
         board.unmake_move(*m, undo);
 
         if score > best_score {

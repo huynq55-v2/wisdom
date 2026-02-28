@@ -1,5 +1,28 @@
 use crate::r#move::Move;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ViolationLevel {
+    Undecided = -1,
+    PerpetualIdle = 0,
+    PerpetualChase = 1,
+    PerpetualCheck = 2,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RepetitionResult {
+    Win,
+    Loss,
+    Draw,
+    Undecided,
+}
+
+#[derive(Copy, Clone)]
+pub struct HistoryEntry {
+    pub hash: u64,
+    pub is_check: bool,
+    pub chased_set: u128,
+    pub is_reversible: bool,
+}
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Color {
     Red,
@@ -133,6 +156,10 @@ impl Board {
         row * 16 + col
     }
 
+    pub fn square_to_dense(sq: usize) -> usize {
+        (sq / 16) * 9 + (sq % 16)
+    }
+
     pub fn piece_at(&self, square: usize) -> Option<Piece> {
         if Self::is_valid_square(square) {
             self.squares[square]
@@ -256,6 +283,143 @@ impl Board {
         self.unmake_move(m, undo);
         
         checks
+    }
+
+    pub fn is_defended(&mut self, sq: usize, defending_color: Color) -> bool {
+        let original_piece = self.piece_at(sq);
+        let mut is_def = false;
+        if let Some(mut piece) = original_piece {
+            piece.color = defending_color.opposite(); // Pretend it's an enemy
+            self.set_piece(sq, Some(piece));
+            
+            let original_side = self.side_to_move;
+            self.side_to_move = defending_color;
+            let captures = self.generate_captures();
+            self.side_to_move = original_side;
+            
+            self.set_piece(sq, original_piece); // Restore
+            
+            for m in captures {
+                if m.to_sq() == sq {
+                    is_def = true;
+                    break;
+                }
+            }
+        }
+        is_def
+    }
+
+    pub fn get_chased_set(&mut self) -> u128 {
+        let mut chased_bitboard: u128 = 0;
+        
+        let attacker_color = self.side_to_move.opposite();
+        let victim_color = self.side_to_move;
+        
+        self.side_to_move = attacker_color;
+        let attacks = self.generate_captures();
+        self.side_to_move = victim_color;
+        
+        for m in attacks {
+            let victim_sq = m.to_sq();
+            let attacker_sq = m.from_sq();
+            
+            if let Some(victim_piece) = self.piece_at(victim_sq) {
+                if let Some(attacker_piece) = self.piece_at(attacker_sq) {
+                    if victim_piece.piece_type == PieceType::King {
+                        continue;
+                    }
+                    
+                    let mut is_unprotected = false;
+                    
+                    if attacker_piece.piece_type.value() < victim_piece.piece_type.value() {
+                        is_unprotected = true;
+                    } else {
+                        if !self.is_defended(victim_sq, victim_color) {
+                            is_unprotected = true;
+                        }
+                    }
+                    
+                    if is_unprotected {
+                        let dense_sq = Self::square_to_dense(victim_sq);
+                        chased_bitboard |= 1_u128 << dense_sq;
+                    }
+                }
+            }
+        }
+        
+        chased_bitboard
+    }
+
+    pub fn judge_repetition(&self, history: &[HistoryEntry], current_ply: usize) -> RepetitionResult {
+        if history.len() < 4 {
+            return RepetitionResult::Undecided;
+        }
+
+        let current_hash = self.zobrist_key;
+        let mut rep_count = 0;
+        let mut loop_start_index = 0;
+
+        let mut i = history.len() as isize - 2; 
+        while i >= 0 {
+            let entry = &history[i as usize];
+            if !entry.is_reversible {
+                break;
+            }
+            if entry.hash == current_hash {
+                rep_count += 1;
+                loop_start_index = i as usize;
+                break;
+            }
+            i -= 2;
+        }
+
+        if rep_count == 0 {
+            return RepetitionResult::Undecided;
+        }
+
+        let mut our_violation = ViolationLevel::PerpetualIdle;
+        let mut opp_violation = ViolationLevel::PerpetualIdle;
+        
+        let mut our_chased_intersection: u128 = !0;
+        let mut opp_chased_intersection: u128 = !0;
+
+        for idx in loop_start_index..history.len() {
+            let entry = &history[idx];
+            if idx % 2 == current_ply % 2 {
+                if entry.is_check {
+                    our_violation = ViolationLevel::PerpetualCheck;
+                } else {
+                    if entry.chased_set != 0 && our_violation < ViolationLevel::PerpetualChase {
+                        our_violation = ViolationLevel::PerpetualChase;
+                    }
+                    our_chased_intersection &= entry.chased_set;
+                }
+            } else {
+                if entry.is_check {
+                    opp_violation = ViolationLevel::PerpetualCheck;
+                } else {
+                    if entry.chased_set != 0 && opp_violation < ViolationLevel::PerpetualChase {
+                        opp_violation = ViolationLevel::PerpetualChase;
+                    }
+                    opp_chased_intersection &= entry.chased_set;
+                }
+            }
+        }
+
+        if our_violation == ViolationLevel::PerpetualChase && our_chased_intersection == 0 {
+            our_violation = ViolationLevel::PerpetualIdle;
+        }
+        if opp_violation == ViolationLevel::PerpetualChase && opp_chased_intersection == 0 {
+            opp_violation = ViolationLevel::PerpetualIdle;
+        }
+
+        if our_violation == opp_violation {
+            RepetitionResult::Draw
+        } else if our_violation > opp_violation {
+            RepetitionResult::Loss
+        } else {
+            RepetitionResult::Win
+        }
     }
 
     /// Evaluates the current board state.
