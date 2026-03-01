@@ -208,3 +208,28 @@ fn test_diagram_3() {
     // Đỏ bị xử thua (Loss) vì lỗi Chiếu luân phiên (Perpetual Check)
     assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
 }
+
+#[test]
+fn test_diagram_4_mutual_perpetual_check() {
+    // Diagram 4: Mutual Perpetual Check (Cả 2 bên cùng Chiếu vĩnh viễn)
+    // - Đỏ dùng Xe và Pháo luân phiên chiếu.
+    // - Đen dùng Xe (nhờ Pháo mở đường) luân phiên chiếu.
+    // Kết quả phải được xử Hòa (Draw) theo luật WXF.
+    let fen = "3akr3/5c3/1P2e4/4R4/9/9/9/9/9/4CK3 w - - 0 1";
+
+    let moves = [
+        "R5+1",
+        "C6=5", // 1. Khởi tạo vòng lặp: Xe Đỏ ăn Tượng chiếu, Pháo Đen cản (mở đường Xe Đen chiếu)
+        "R5=4",
+        "C5=6", // 2. Xe Đỏ cản (mở đường Pháo Đỏ chiếu), Pháo Đen chạy ra (hết chiếu)
+        // --- Lặp lại chu kỳ để đưa vào History ---
+        "R4=5", "C6=5", // 3. R4=5 (Xe Đỏ chiếu)  | C6=5 (Xe Đen chiếu)
+        "R5=4", "C5=6", // 4. R5=4 (Pháo Đỏ chiếu)| C5=6 (Pháo Đen chặn)
+        "R4=5", "C6=5", // 5.
+        "R5=4", "C5=6", // 6.
+    ];
+
+    // Khi gọi judge_repetition, cả our_violation và opp_violation đều sẽ là PerpetualCheck (2).
+    // 2 == 2 -> Trả về Draw.
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
