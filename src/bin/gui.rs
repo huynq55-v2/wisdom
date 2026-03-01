@@ -32,13 +32,23 @@ fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry
     let is_capture = !board.is_empty(m.to_sq());
     let piece = board.piece_at(m.from_sq()).unwrap();
     let is_reversible = !is_capture && piece.piece_type != PieceType::Pawn;
+    let moving_side = board.side_to_move;
+
+    // Compute pre-move threats BEFORE making the move
+    let pre_threats = if is_reversible {
+        board.get_unprotected_threats(moving_side)
+    } else {
+        0
+    };
 
     board.make_move(m);
 
     let gives_check = board.is_in_check(board.side_to_move);
 
+    // Only NEW threats count as "chase" per WXF rules
     let chased_set = if is_reversible && !gives_check {
-        board.get_chased_set()
+        let post_threats = board.get_unprotected_threats(moving_side);
+        post_threats & !pre_threats
     } else {
         0
     };

@@ -309,15 +309,16 @@ impl Board {
         is_def
     }
 
-    pub fn get_chased_set(&mut self) -> u128 {
-        let mut chased_bitboard: u128 = 0;
+    /// Returns a bitboard of opponent pieces under unprotected attack by `attacker_color`.
+    /// Used to compute NEW threats by comparing before/after a move.
+    pub fn get_unprotected_threats(&mut self, attacker_color: Color) -> u128 {
+        let mut threats: u128 = 0;
+        let victim_color = attacker_color.opposite();
         
-        let attacker_color = self.side_to_move.opposite();
-        let victim_color = self.side_to_move;
-        
+        let original_side = self.side_to_move;
         self.side_to_move = attacker_color;
         let attacks = self.generate_captures();
-        self.side_to_move = victim_color;
+        self.side_to_move = original_side;
         
         for m in attacks {
             let victim_sq = m.to_sq();
@@ -329,25 +330,49 @@ impl Board {
                         continue;
                     }
                     
-                    let mut is_unprotected = false;
-                    
-                    if attacker_piece.piece_type.value() < victim_piece.piece_type.value() {
-                        is_unprotected = true;
+                    let is_unprotected = if attacker_piece.piece_type.value() < victim_piece.piece_type.value() {
+                        true
                     } else {
-                        if !self.is_defended(victim_sq, victim_color) {
-                            is_unprotected = true;
-                        }
-                    }
+                        !self.is_defended(victim_sq, victim_color)
+                    };
                     
                     if is_unprotected {
                         let dense_sq = Self::square_to_dense(victim_sq);
-                        chased_bitboard |= 1_u128 << dense_sq;
+                        threats |= 1_u128 << dense_sq;
                     }
                 }
             }
         }
         
-        chased_bitboard
+        threats
+    }
+
+    /// Algorithm 10: Quick prune if draw score (0) >= beta and our side is idle in the cycle.
+    /// Avoids computing opponent's violation level entirely.
+    pub fn judge_prune(&self, history: &[HistoryEntry], current_ply: usize, beta: i32) -> bool {
+        if 0 < beta || history.len() < 4 {
+            return false;
+        }
+
+        let current_hash = self.zobrist_key;
+        let mut i = history.len() as isize - 3;
+        while i >= 0 {
+            let entry = &history[i as usize];
+            if !entry.is_reversible { break; }
+            if entry.hash == current_hash {
+                // Found cycle - check if all OUR moves are idle (no check, no chase)
+                for idx in (i as usize)..history.len() {
+                    if idx % 2 == current_ply % 2 {
+                        if history[idx].is_check || history[idx].chased_set != 0 {
+                            return false; // We have a violation, can't prune
+                        }
+                    }
+                }
+                return true; // All our moves are idle → draw prune
+            }
+            i -= 2;
+        }
+        false
     }
 
     pub fn judge_repetition(&self, history: &[HistoryEntry], current_ply: usize) -> RepetitionResult {
@@ -359,8 +384,6 @@ impl Board {
         let mut rep_count = 0;
         let mut loop_start_index = 0;
 
-        // FIX: Step back 3 (not 2) so we compare with the same side's hash
-        // (zobrist_key includes side_to_move flag, so same position with different side has different hash)
         let mut i = history.len() as isize - 3; 
         while i >= 0 {
             let entry = &history[i as usize];
@@ -379,8 +402,6 @@ impl Board {
             return RepetitionResult::Undecided;
         }
 
-        // FIX: Use strict all_checks / all_chases logic per WXF rules
-        // If even one move in the loop is NOT a check, it's not Perpetual Check
         let mut our_all_checks = true;
         let mut our_all_chases = true;
         let mut opp_all_checks = true;

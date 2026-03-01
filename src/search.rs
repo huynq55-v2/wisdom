@@ -6,7 +6,6 @@ pub const MATE_VALUE: i32 = 20000;
 
 pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::TranspositionTable, game_history: &[HistoryEntry]) -> Move {
     let mut history = game_history.to_vec();
-    // Standard Negamax Search
     let mut best_move = None;
     let mut alpha = -INFINITY;
     let beta = INFINITY;
@@ -16,26 +15,21 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
         tt_move = best_tt;
     }
 
-    // We must generate moves at root and pick the one with highest score.
-    let mut moves = board.generate_captures();
-    moves.sort_by_key(|&m| -mvv_lva(board, m));
-    let mut quiets = board.generate_quiets();
-    moves.append(&mut quiets); // captures first for move ordering
+    let moving_side = board.side_to_move;
 
-    // Move TT move to the front
+    // === Algorithm 9: Staged Evaluation ===
+    // Phase 1: Process captures first (no chase computation needed)
+    let mut captures = board.generate_captures();
+    captures.sort_by_key(|&m| -mvv_lva(board, m));
+
+    // TT move to front of captures
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = moves.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
-            moves.swap(0, pos);
+        if let Some(pos) = captures.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+            captures.swap(0, pos);
         }
     }
 
-    let moving_side = board.side_to_move;
-
-    for m in &moves {
-        let is_capture = !board.is_empty(m.to_sq());
-        let piece = board.piece_at(m.from_sq()).unwrap();
-        let is_reversible = !is_capture && piece.piece_type != crate::board::PieceType::Pawn;
-
+    for m in &captures {
         let undo = board.make_move(*m);
 
         if board.kings_facing() || board.is_in_check(moving_side) {
@@ -46,17 +40,11 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
         let gives_check = board.is_in_check(moving_side.opposite());
         let next_depth = if gives_check { depth } else { depth - 1 };
 
-        let chased_set = if is_reversible && !gives_check {
-            board.get_chased_set()
-        } else {
-            0
-        };
-
         history.push(HistoryEntry {
             hash: board.zobrist_key,
             is_check: gives_check,
-            chased_set,
-            is_reversible,
+            chased_set: 0, // Captures are never reversible
+            is_reversible: false,
         });
 
         let score = -negamax(board, next_depth, 1, -beta, -alpha, tt, &mut history);
@@ -70,15 +58,89 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
         }
     }
 
+    // Phase 2: Process quiet moves (only if no beta cutoff during captures)
+    if alpha < beta {
+        let mut quiets = board.generate_quiets();
+
+        // TT move to front of quiets
+        if let Some(t_mv) = tt_move {
+            if let Some(pos) = quiets.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+                quiets.swap(0, pos);
+            }
+        }
+
+        for m in &quiets {
+            let piece = board.piece_at(m.from_sq()).unwrap();
+            let is_reversible = piece.piece_type != crate::board::PieceType::Pawn;
+
+            let pre_threats = if is_reversible {
+                board.get_unprotected_threats(moving_side)
+            } else {
+                0
+            };
+
+            let undo = board.make_move(*m);
+
+            if board.kings_facing() || board.is_in_check(moving_side) {
+                board.unmake_move(*m, undo);
+                continue;
+            }
+
+            let gives_check = board.is_in_check(moving_side.opposite());
+            let next_depth = if gives_check { depth } else { depth - 1 };
+
+            let chased_set = if is_reversible && !gives_check {
+                let post_threats = board.get_unprotected_threats(moving_side);
+                post_threats & !pre_threats
+            } else {
+                0
+            };
+
+            history.push(HistoryEntry {
+                hash: board.zobrist_key,
+                is_check: gives_check,
+                chased_set,
+                is_reversible,
+            });
+
+            let score = -negamax(board, next_depth, 1, -beta, -alpha, tt, &mut history);
+
+            history.pop();
+            board.unmake_move(*m, undo);
+
+            if score > alpha {
+                alpha = score;
+                best_move = Some(*m);
+            }
+        }
+    }
+
     if let Some(bm) = best_move {
         tt.record(board.zobrist_key, depth, 0, alpha, crate::tt::FLAG_EXACT, Some(bm));
     }
 
-    best_move.unwrap_or(moves[0]) // Fallback
+    // Fallback: if no best_move found, pick first legal move
+    if best_move.is_none() {
+        let mut all_moves = board.generate_captures();
+        all_moves.append(&mut board.generate_quiets());
+        for m in &all_moves {
+            let undo = board.make_move(*m);
+            let legal = !board.kings_facing() && !board.is_in_check(moving_side);
+            board.unmake_move(*m, undo);
+            if legal { return *m; }
+        }
+    }
+
+    best_move.unwrap()
 }
 
 fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable, history: &mut Vec<HistoryEntry>) -> i32 {
     
+    // Algorithm 10: Quick prune if draw beats beta and we are idle
+    if board.judge_prune(history, history.len(), beta) {
+        return 0;
+    }
+
     match board.judge_repetition(history, history.len()) {
         RepetitionResult::Win => return MATE_VALUE - ply as i32,
         RepetitionResult::Loss => return -MATE_VALUE + ply as i32,
@@ -100,27 +162,82 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
         tt_move = best_tt;
     }
 
-    let mut moves = board.generate_captures();
-    moves.sort_by_key(|&m| -mvv_lva(board, m));
-    let mut quiets = board.generate_quiets();
-    moves.append(&mut quiets);
-
-    // Swap tt_move to front
-    if let Some(t_mv) = tt_move {
-        if let Some(pos) = moves.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
-            moves.swap(0, pos);
-        }
-    }
-
     let mut best_score = -INFINITY;
     let mut best_move = None;
     let moving_side = board.side_to_move;
     let mut has_legal_moves = false;
 
-    for m in &moves {
-        let is_capture = !board.is_empty(m.to_sq());
+    // === Algorithm 9: Staged Evaluation ===
+    // Phase 1: Process captures (no chase computation, likely to cause beta cutoff)
+    let mut captures = board.generate_captures();
+    captures.sort_by_key(|&m| -mvv_lva(board, m));
+
+    // TT move to front of captures
+    if let Some(t_mv) = tt_move {
+        if let Some(pos) = captures.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+            captures.swap(0, pos);
+        }
+    }
+
+    for m in &captures {
+        let undo = board.make_move(*m);
+
+        if board.kings_facing() || board.is_in_check(moving_side) {
+            board.unmake_move(*m, undo);
+            continue;
+        }
+
+        has_legal_moves = true;
+
+        let gives_check = board.is_in_check(moving_side.opposite());
+        let next_depth = if gives_check { depth } else { depth - 1 };
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set: 0,
+            is_reversible: false,
+        });
+
+        let score = -negamax(board, next_depth, ply + 1, -beta, -alpha, tt, history);
+
+        history.pop();
+        board.unmake_move(*m, undo);
+
+        if score > best_score {
+            best_score = score;
+            best_move = Some(*m);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            // Beta cutoff during captures — skip quiet move generation entirely!
+            let flag = crate::tt::FLAG_BETA;
+            tt.record(board.zobrist_key, depth, ply, best_score, flag, best_move);
+            return best_score;
+        }
+    }
+
+    // Phase 2: Process quiet moves (expensive chase computation only here)
+    let mut quiets = board.generate_quiets();
+
+    // TT move to front of quiets
+    if let Some(t_mv) = tt_move {
+        if let Some(pos) = quiets.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+            quiets.swap(0, pos);
+        }
+    }
+
+    for m in &quiets {
         let piece = board.piece_at(m.from_sq()).unwrap();
-        let is_reversible = !is_capture && piece.piece_type != crate::board::PieceType::Pawn;
+        let is_reversible = piece.piece_type != crate::board::PieceType::Pawn;
+
+        let pre_threats = if is_reversible {
+            board.get_unprotected_threats(moving_side)
+        } else {
+            0
+        };
 
         let undo = board.make_move(*m);
 
@@ -135,7 +252,8 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
         let next_depth = if gives_check { depth } else { depth - 1 };
 
         let chased_set = if is_reversible && !gives_check {
-            board.get_chased_set()
+            let post_threats = board.get_unprotected_threats(moving_side);
+            post_threats & !pre_threats
         } else {
             0
         };
@@ -160,13 +278,11 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
             alpha = score;
         }
         if alpha >= beta {
-            break; // Beta cutoff
+            break;
         }
     }
 
     if !has_legal_moves {
-        // If in check -> Checkmate
-        // If not in check -> Stalemate (also loss in Xiangqi)
         return -MATE_VALUE + ply as i32;
     }
 
