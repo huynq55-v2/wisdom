@@ -195,9 +195,8 @@ fn test_diagram_1() {
     // 3 Chu kỳ lặp lại cho Perpetual Check (để đảm bảo đủ history)
     let moves = [
         "R2+1", "K6+1", "R2-1", "K6-1", "R2+1", "K6+1", "R2-1", "K6-1", "R2+1", "K6+1", "R2-1",
-        "K6-1",
     ];
-    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Win);
 }
 
 #[test]
@@ -207,10 +206,10 @@ fn test_diagram_3() {
         // --- Chu kỳ 1 ---
         "R4+1", "K4+1", "R5=6", "K4=5", "R6=5", "K5=4", "R4-1", "K4-1",
         // --- Chu kỳ 2 (Lặp lại để tạo Repetition) ---
-        "R4+1", "K4+1", "R5=6", "K4=5", "R6=5", "K5=4", "R4-1", "K4-1",
+        "R4+1", "K4+1", "R5=6", "K4=5", "R6=5", "K5=4", "R4-1",
     ];
-    // Đỏ bị xử thua (Loss) vì lỗi Chiếu luân phiên (Perpetual Check)
-    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
+    // Đỏ bị xử thua (Loss) vì lỗi Chiếu luân phiên (Perpetual Check). Đen Win
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Win);
 }
 
 #[test]
@@ -230,7 +229,7 @@ fn test_diagram_4_mutual_perpetual_check() {
         "R4=5", "C6=5", // 3. R4=5 (Xe Đỏ chiếu)  | C6=5 (Xe Đen chiếu)
         "R5=4", "C5=6", // 4. R5=4 (Pháo Đỏ chiếu)| C5=6 (Pháo Đen chặn)
         "R4=5", "C6=5", // 5.
-        "R5=4", "C5=6", // 6.
+        "R5=4",
     ];
 
     // Khi gọi judge_repetition, cả our_violation và opp_violation đều sẽ là PerpetualCheck (2).
@@ -244,8 +243,7 @@ fn test_diagram_5_perpetual_check_with_multiple_pieces() {
 
     let moves = [
         "P4=5", "P6=5", "P5=4", "P5=6", "P4=5", "P6=5", "P5=4", "P5=6", "P4=5", "P6=5", "P5=4",
-        "P5=6",
     ];
 
-    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Win);
 }
