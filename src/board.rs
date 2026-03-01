@@ -406,26 +406,21 @@ impl Board {
         let mut our_all_chases = true;
         let mut opp_all_checks = true;
         let mut opp_all_chases = true;
-        
-        let mut our_chased_intersection: u128 = !0;
-        let mut opp_chased_intersection: u128 = !0;
 
         for idx in loop_start_index..history.len() {
             let entry = &history[idx];
             if idx % 2 == current_ply % 2 {
                 if !entry.is_check { our_all_checks = false; }
                 if entry.chased_set == 0 { our_all_chases = false; }
-                our_chased_intersection &= entry.chased_set;
             } else {
                 if !entry.is_check { opp_all_checks = false; }
                 if entry.chased_set == 0 { opp_all_chases = false; }
-                opp_chased_intersection &= entry.chased_set;
             }
         }
 
         let our_violation = if our_all_checks {
             ViolationLevel::PerpetualCheck
-        } else if our_all_chases && our_chased_intersection != 0 {
+        } else if our_all_chases {
             ViolationLevel::PerpetualChase
         } else {
             ViolationLevel::PerpetualIdle
@@ -433,7 +428,7 @@ impl Board {
 
         let opp_violation = if opp_all_checks {
             ViolationLevel::PerpetualCheck
-        } else if opp_all_chases && opp_chased_intersection != 0 {
+        } else if opp_all_chases {
             ViolationLevel::PerpetualChase
         } else {
             ViolationLevel::PerpetualIdle

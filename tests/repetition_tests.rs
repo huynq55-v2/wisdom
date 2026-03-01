@@ -1,0 +1,210 @@
+use wisdom::board::{Board, Color, HistoryEntry, PieceType, RepetitionResult};
+use wisdom::ucci::parse_fen;
+
+/// Hàm dịch ký hiệu đại số (VD: R4+1, K5=4) sang nước đi (Move) hợp lệ của Engine
+fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
+    let chars: Vec<char> = alg.chars().collect();
+    let p_char = chars[0];
+    let start_file_digit = chars[1].to_digit(10).unwrap() as u8;
+    let op = chars[2];
+    let arg_digit = chars[3].to_digit(10).unwrap() as u8;
+
+    let moving_side = board.side_to_move;
+
+    // Đỏ đếm 1-9 từ phải sang trái (9 -> 1 theo tọa độ cột UCCI)
+    // Đen đếm 1-9 từ trái sang phải (1 -> 9 theo tọa độ cột UCCI)
+    let expected_from_col = if moving_side == Color::Red {
+        9 - start_file_digit
+    } else {
+        start_file_digit - 1
+    };
+
+    let expected_piece_type = match p_char {
+        'K' => PieceType::King,
+        'A' => PieceType::Advisor,
+        'E' | 'B' => PieceType::Elephant,
+        'H' | 'N' => PieceType::Horse,
+        'R' => PieceType::Rook,
+        'C' => PieceType::Cannon,
+        'P' => PieceType::Pawn,
+        _ => panic!("Unknown piece type: {}", p_char),
+    };
+
+    let mut moves = board.generate_captures();
+    moves.append(&mut board.generate_quiets());
+
+    for m in moves {
+        let from_sq = m.from_sq();
+        let to_sq = m.to_sq();
+
+        let (from_row, from_col) = Board::square_to_coord(from_sq);
+        let (to_row, to_col) = Board::square_to_coord(to_sq);
+
+        if from_col as u8 != expected_from_col {
+            continue;
+        }
+
+        let piece = board.piece_at(from_sq).unwrap();
+        if piece.piece_type != expected_piece_type {
+            continue;
+        }
+        if piece.color != moving_side {
+            continue;
+        }
+
+        let is_straight = matches!(
+            piece.piece_type,
+            PieceType::King | PieceType::Rook | PieceType::Cannon | PieceType::Pawn
+        );
+
+        match op {
+            '=' => {
+                // Bình ngang
+                let expected_to_col = if moving_side == Color::Red {
+                    9 - arg_digit
+                } else {
+                    arg_digit - 1
+                };
+                if to_col as u8 == expected_to_col && to_row == from_row {
+                    return m;
+                }
+            }
+            '+' => {
+                // Tiến
+                if is_straight {
+                    // Quân đi thẳng: số phía sau là số bước tiến
+                    if from_col != to_col {
+                        continue;
+                    }
+                    let expected_to_row = if moving_side == Color::Red {
+                        from_row as i32 - arg_digit as i32
+                    } else {
+                        from_row as i32 + arg_digit as i32
+                    };
+                    if to_row as i32 == expected_to_row {
+                        return m;
+                    }
+                } else {
+                    // Quân đi chéo (Mã, Tượng, Sĩ): số phía sau là cột mục tiêu
+                    let expected_to_col = if moving_side == Color::Red {
+                        9 - arg_digit
+                    } else {
+                        arg_digit - 1
+                    };
+                    let is_forward = if moving_side == Color::Red {
+                        to_row < from_row
+                    } else {
+                        to_row > from_row
+                    };
+                    if is_forward && to_col as u8 == expected_to_col {
+                        return m;
+                    }
+                }
+            }
+            '-' => {
+                // Thoái
+                if is_straight {
+                    // Quân đi thẳng: số phía sau là số bước lùi
+                    if from_col != to_col {
+                        continue;
+                    }
+                    let expected_to_row = if moving_side == Color::Red {
+                        from_row as i32 + arg_digit as i32
+                    } else {
+                        from_row as i32 - arg_digit as i32
+                    };
+                    if to_row as i32 == expected_to_row {
+                        return m;
+                    }
+                } else {
+                    // Quân đi chéo: số phía sau là cột mục tiêu
+                    let expected_to_col = if moving_side == Color::Red {
+                        9 - arg_digit
+                    } else {
+                        arg_digit - 1
+                    };
+                    let is_backward = if moving_side == Color::Red {
+                        to_row > from_row
+                    } else {
+                        to_row < from_row
+                    };
+                    if is_backward && to_col as u8 == expected_to_col {
+                        return m;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("Move not found or illegal: {}", alg);
+}
+
+fn run_repetition_scenario(fen: &str, moves: &[&str]) -> RepetitionResult {
+    let mut board = Board::new();
+    parse_fen(&mut board, fen);
+
+    let mut history: Vec<HistoryEntry> = Vec::new();
+
+    for alg_move in moves {
+        let m = parse_algebraic(&board, alg_move);
+
+        let piece = board.piece_at(m.from_sq()).unwrap();
+        let is_reversible = piece.piece_type != PieceType::Pawn;
+        let moving_side = board.side_to_move;
+
+        let pre_threats = if is_reversible {
+            board.get_unprotected_threats(moving_side)
+        } else {
+            0
+        };
+
+        board.make_move(m);
+
+        let gives_check = board.is_in_check(moving_side.opposite());
+
+        let chased_set = if is_reversible && !gives_check {
+            let post_threats = board.get_unprotected_threats(moving_side);
+            post_threats & !pre_threats
+        } else {
+            0
+        };
+
+        println!(
+            "Move: {:<5} | Side: {:?} | Check: {:<5} | ChasedSet: {:b}",
+            alg_move, moving_side, gives_check, chased_set
+        );
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set,
+            is_reversible,
+        });
+    }
+
+    board.judge_repetition(&history, history.len())
+}
+
+#[test]
+fn test_diagram_1() {
+    let fen = "c2a1k3/2c1a2R1/e6P1/8p/9/9/9/9/9/4K4 w - - 0 1";
+    // 3 Chu kỳ lặp lại cho Perpetual Check (để đảm bảo đủ history)
+    let moves = [
+        "R2+1", "K6+1", "R2-1", "K6-1", "R2+1", "K6+1", "R2-1", "K6-1", "R2+1", "K6+1", "R2-1",
+        "K6-1",
+    ];
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
+}
+
+#[test]
+fn test_diagram_3() {
+    let fen = "3kR4/5R3/9/2e6/9/n8/3pE4/4p4/9/4K4 w - - 0 1";
+    let moves = [
+        // --- Chu kỳ 1 ---
+        "R4+1", "K4+1", "R5=6", "K4=5", "R6=5", "K5=4", "R4-1", "K4-1",
+        // --- Chu kỳ 2 (Lặp lại để tạo Repetition) ---
+        "R4+1", "K4+1", "R5=6", "K4=5", "R6=5", "K5=4", "R4-1", "K4-1",
+    ];
+    // Đỏ bị xử thua (Loss) vì lỗi Chiếu luân phiên (Perpetual Check)
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
+}
