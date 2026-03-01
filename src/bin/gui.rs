@@ -1,5 +1,5 @@
 use macroquad::prelude::*;
-use wisdom::board::{Board, Color as PieceColor, PieceType};
+use wisdom::board::{Board, Color as PieceColor, PieceType, HistoryEntry, RepetitionResult};
 use wisdom::r#move::Move;
 use wisdom::search::search_best_move;
 
@@ -26,6 +26,29 @@ fn get_legal_moves(board: &mut Board) -> Vec<Move> {
         board.unmake_move(m, undo);
         valid
     }).collect()
+}
+
+fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry>) {
+    let is_capture = !board.is_empty(m.to_sq());
+    let piece = board.piece_at(m.from_sq()).unwrap();
+    let is_reversible = !is_capture && piece.piece_type != PieceType::Pawn;
+
+    board.make_move(m);
+
+    let gives_check = board.is_in_check(board.side_to_move);
+
+    let chased_set = if is_reversible && !gives_check {
+        board.get_chased_set()
+    } else {
+        0
+    };
+
+    history.push(HistoryEntry {
+        hash: board.zobrist_key,
+        is_check: gives_check,
+        chased_set,
+        is_reversible,
+    });
 }
 
 fn draw_board() {
@@ -139,10 +162,12 @@ async fn main() {
     board.set_initial_position();
 
     let mut tt = wisdom::tt::TranspositionTable::new(64);
+    let mut game_history: Vec<HistoryEntry> = Vec::new();
 
     let mut selected_sq: Option<usize> = None;
     let mut legal_moves = Vec::new();
     let mut game_over = false;
+    let mut game_over_message = String::from("GAME OVER");
 
     // UI State
     let mut game_mode = GameMode::EngineVsPlayer;
@@ -165,9 +190,11 @@ async fn main() {
         if draw_button("Reset Game", panel_x, py, 200.0, 40.0, false, BLUE) {
             board.set_initial_position();
             tt = wisdom::tt::TranspositionTable::new(64);
+            game_history.clear();
             selected_sq = None;
             legal_moves.clear();
             game_over = false;
+            game_over_message = "GAME OVER".into();
             current_eval = Some(board.evaluate());
         }
         py += 60.0;
@@ -178,18 +205,22 @@ async fn main() {
         if draw_button("Engine vs Player", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsPlayer, GRAY) {
             game_mode = GameMode::EngineVsPlayer;
             board.set_initial_position();
+            game_history.clear();
             selected_sq = None;
             legal_moves.clear();
             game_over = false;
+            game_over_message = "GAME OVER".into();
             current_eval = Some(board.evaluate());
         }
         py += 40.0;
         if draw_button("Engine vs Engine", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsEngine, GRAY) {
             game_mode = GameMode::EngineVsEngine;
             board.set_initial_position();
+            game_history.clear();
             selected_sq = None;
             legal_moves.clear();
             game_over = false;
+            game_over_message = "GAME OVER".into();
             current_eval = Some(board.evaluate());
         }
         py += 40.0;
@@ -201,17 +232,21 @@ async fn main() {
             if draw_button("Play Red", panel_x, py, 80.0, 30.0, human_color == PieceColor::Red, GRAY) {
                 human_color = PieceColor::Red;
                 board.set_initial_position();
+                game_history.clear();
                 selected_sq = None;
                 legal_moves.clear();
                 game_over = false;
+                game_over_message = "GAME OVER".into();
                 current_eval = Some(board.evaluate());
             }
             if draw_button("Play Black", panel_x + 90.0, py, 90.0, 30.0, human_color == PieceColor::Black, GRAY) {
                 human_color = PieceColor::Black;
                 board.set_initial_position();
+                game_history.clear();
                 selected_sq = None;
                 legal_moves.clear();
                 game_over = false;
+                game_over_message = "GAME OVER".into();
                 current_eval = Some(board.evaluate());
             }
             py += 40.0;
@@ -241,7 +276,7 @@ async fn main() {
         py += 50.0;
 
         if game_over {
-            draw_text("GAME OVER", OFFSET_X, OFFSET_Y / 2.0, 50.0, RED);
+            draw_text(&game_over_message, OFFSET_X, OFFSET_Y / 2.0, 30.0, RED);
         }
         
         // --- GAME LOGIC ---
@@ -263,15 +298,36 @@ async fn main() {
                         if selected_sq.is_some() {
                             // Try to execute move
                             if let Some(&m) = legal_moves.iter().find(|m| m.to_sq() == sq) {
-                                board.make_move(m);
+                                apply_move_to_game(&mut board, m, &mut game_history);
                                 selected_sq = None;
                                 legal_moves.clear();
-                                let all = get_legal_moves(&mut board);
-                                if all.is_empty() { 
-                                    game_over = true;
-                                    current_eval = Some(-20000); 
-                                } else {
-                                    current_eval = Some(board.evaluate());
+
+                                match board.judge_repetition(&game_history, game_history.len()) {
+                                    RepetitionResult::Win => {
+                                        game_over = true;
+                                        game_over_message = "Rule Violation: You Lose!".into();
+                                        current_eval = Some(-20000);
+                                    }
+                                    RepetitionResult::Loss => {
+                                        game_over = true;
+                                        game_over_message = "Opponent Violation: You Win!".into();
+                                        current_eval = Some(20000);
+                                    }
+                                    RepetitionResult::Draw => {
+                                        game_over = true;
+                                        game_over_message = "Draw by Repetition!".into();
+                                        current_eval = Some(0);
+                                    }
+                                    RepetitionResult::Undecided => {
+                                        let all = get_legal_moves(&mut board);
+                                        if all.is_empty() {
+                                            game_over = true;
+                                            game_over_message = "Checkmate!".into();
+                                            current_eval = Some(-20000);
+                                        } else {
+                                            current_eval = Some(board.evaluate());
+                                        }
+                                    }
                                 }
                             } else {
                                 // Select another piece if valid
@@ -306,16 +362,37 @@ async fn main() {
                 let all_moves = get_legal_moves(&mut board);
                 if all_moves.is_empty() {
                     game_over = true;
-                    current_eval = Some(-20000); // Current player has no moves (mated)
+                    game_over_message = "Checkmate!".into();
+                    current_eval = Some(-20000);
                 } else {
-                    let best_move = search_best_move(&mut board, search_depth, &mut tt);
-                    board.make_move(best_move);
-                    
-                    if get_legal_moves(&mut board).is_empty() {
-                        game_over = true;
-                        current_eval = Some(20000); // Opposite player has no moves
-                    } else {
-                        current_eval = Some(board.evaluate());
+                    let best_move = search_best_move(&mut board, search_depth, &mut tt, &game_history);
+                    apply_move_to_game(&mut board, best_move, &mut game_history);
+
+                    match board.judge_repetition(&game_history, game_history.len()) {
+                        RepetitionResult::Win => {
+                            game_over = true;
+                            game_over_message = "Engine Violation: You Win!".into();
+                            current_eval = Some(20000);
+                        }
+                        RepetitionResult::Loss => {
+                            game_over = true;
+                            game_over_message = "Rule Violation: Engine Wins!".into();
+                            current_eval = Some(-20000);
+                        }
+                        RepetitionResult::Draw => {
+                            game_over = true;
+                            game_over_message = "Draw by Repetition!".into();
+                            current_eval = Some(0);
+                        }
+                        RepetitionResult::Undecided => {
+                            if get_legal_moves(&mut board).is_empty() {
+                                game_over = true;
+                                game_over_message = "Checkmate!".into();
+                                current_eval = Some(20000);
+                            } else {
+                                current_eval = Some(board.evaluate());
+                            }
+                        }
                     }
                 }
             }

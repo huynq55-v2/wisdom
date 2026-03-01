@@ -359,7 +359,9 @@ impl Board {
         let mut rep_count = 0;
         let mut loop_start_index = 0;
 
-        let mut i = history.len() as isize - 2; 
+        // FIX: Step back 3 (not 2) so we compare with the same side's hash
+        // (zobrist_key includes side_to_move flag, so same position with different side has different hash)
+        let mut i = history.len() as isize - 3; 
         while i >= 0 {
             let entry = &history[i as usize];
             if !entry.is_reversible {
@@ -377,8 +379,12 @@ impl Board {
             return RepetitionResult::Undecided;
         }
 
-        let mut our_violation = ViolationLevel::PerpetualIdle;
-        let mut opp_violation = ViolationLevel::PerpetualIdle;
+        // FIX: Use strict all_checks / all_chases logic per WXF rules
+        // If even one move in the loop is NOT a check, it's not Perpetual Check
+        let mut our_all_checks = true;
+        let mut our_all_chases = true;
+        let mut opp_all_checks = true;
+        let mut opp_all_chases = true;
         
         let mut our_chased_intersection: u128 = !0;
         let mut opp_chased_intersection: u128 = !0;
@@ -386,32 +392,31 @@ impl Board {
         for idx in loop_start_index..history.len() {
             let entry = &history[idx];
             if idx % 2 == current_ply % 2 {
-                if entry.is_check {
-                    our_violation = ViolationLevel::PerpetualCheck;
-                } else {
-                    if entry.chased_set != 0 && our_violation < ViolationLevel::PerpetualChase {
-                        our_violation = ViolationLevel::PerpetualChase;
-                    }
-                    our_chased_intersection &= entry.chased_set;
-                }
+                if !entry.is_check { our_all_checks = false; }
+                if entry.chased_set == 0 { our_all_chases = false; }
+                our_chased_intersection &= entry.chased_set;
             } else {
-                if entry.is_check {
-                    opp_violation = ViolationLevel::PerpetualCheck;
-                } else {
-                    if entry.chased_set != 0 && opp_violation < ViolationLevel::PerpetualChase {
-                        opp_violation = ViolationLevel::PerpetualChase;
-                    }
-                    opp_chased_intersection &= entry.chased_set;
-                }
+                if !entry.is_check { opp_all_checks = false; }
+                if entry.chased_set == 0 { opp_all_chases = false; }
+                opp_chased_intersection &= entry.chased_set;
             }
         }
 
-        if our_violation == ViolationLevel::PerpetualChase && our_chased_intersection == 0 {
-            our_violation = ViolationLevel::PerpetualIdle;
-        }
-        if opp_violation == ViolationLevel::PerpetualChase && opp_chased_intersection == 0 {
-            opp_violation = ViolationLevel::PerpetualIdle;
-        }
+        let our_violation = if our_all_checks {
+            ViolationLevel::PerpetualCheck
+        } else if our_all_chases && our_chased_intersection != 0 {
+            ViolationLevel::PerpetualChase
+        } else {
+            ViolationLevel::PerpetualIdle
+        };
+
+        let opp_violation = if opp_all_checks {
+            ViolationLevel::PerpetualCheck
+        } else if opp_all_chases && opp_chased_intersection != 0 {
+            ViolationLevel::PerpetualChase
+        } else {
+            ViolationLevel::PerpetualIdle
+        };
 
         if our_violation == opp_violation {
             RepetitionResult::Draw

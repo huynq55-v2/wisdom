@@ -4,8 +4,8 @@ use crate::r#move::Move;
 pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
-pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::TranspositionTable) -> Move {
-    let mut history = Vec::with_capacity(128);
+pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::TranspositionTable, game_history: &[HistoryEntry]) -> Move {
+    let mut history = game_history.to_vec();
     // Standard Negamax Search
     let mut best_move = None;
     let mut alpha = -INFINITY;
@@ -79,7 +79,7 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
 
 fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable, history: &mut Vec<HistoryEntry>) -> i32 {
     
-    match board.judge_repetition(history, ply as usize) {
+    match board.judge_repetition(history, history.len()) {
         RepetitionResult::Win => return MATE_VALUE - ply as i32,
         RepetitionResult::Loss => return -MATE_VALUE + ply as i32,
         RepetitionResult::Draw => return 0,
