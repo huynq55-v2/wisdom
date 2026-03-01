@@ -51,15 +51,12 @@ fn parse_and_save(content: &str, writer: &mut BufWriter<File>) -> bool {
     // 1. KIỂM TRA XEM CÓ PHẢI VÁN CỜ TIÊU CHUẨN KHÔNG
     let binit = extract_tag(content, "DhtmlXQ_binit");
     let standard_binit = "0919293949596979891777062646668600102030405060708012720323436383";
-    
-    // Nếu file có tag binit nhưng khác với vị trí chuẩn -> Bỏ qua (Đó là cờ tàn/cờ thế)
     if !binit.is_empty() && binit != standard_binit {
         return false; 
     }
 
-    // Trích xuất kết quả ván cờ
+    // 2. TRÍCH XUẤT KẾT QUẢ VÁN CỜ
     let result_str = extract_tag(content, "DhtmlXQ_result");
-    
     let red_score = if result_str.contains("红胜") || result_str.contains("黑负") || result_str.contains("红先胜") {
         1.0
     } else if result_str.contains("黑胜") || result_str.contains("红负") || result_str.contains("红先负") {
@@ -70,56 +67,59 @@ fn parse_and_save(content: &str, writer: &mut BufWriter<File>) -> bool {
         return false;
     };
 
+    // 3. TRÍCH XUẤT MOVELIST (FIX LỖI KÝ TỰ XUỐNG DÒNG)
     let movelist = extract_tag(content, "DhtmlXQ_movelist");
-    if movelist.is_empty() || movelist.len() % 4 != 0 {
+    // Lọc loại bỏ mọi dấu cách, \r, \n. Chỉ giữ lại đúng số [0-9]
+    let chars: Vec<char> = movelist.chars().filter(|c| c.is_ascii_digit()).collect();
+    if chars.is_empty() || chars.len() % 4 != 0 {
         return false;
     }
 
     let mut board = Board::new();
     board.set_initial_position();
 
-    let chars: Vec<char> = movelist.chars().collect();
-    
+    // FIX LỖI RÒ RỈ DATA: Tạo mảng tạm để chứa các dòng FEN
+    let mut temp_lines = Vec::with_capacity(chars.len() / 4);
+
     for chunk in chars.chunks(4) {
-        // ... (phần code xử lý chunk tọa độ giữ nguyên như cũ) ...
-        let x1 = chunk[0].to_digit(10);
-        let y1 = chunk[1].to_digit(10);
-        let x2 = chunk[2].to_digit(10);
-        let y2 = chunk[3].to_digit(10);
+        let x1 = chunk[0].to_digit(10).unwrap() as usize;
+        let y1 = chunk[1].to_digit(10).unwrap() as usize;
+        let x2 = chunk[2].to_digit(10).unwrap() as usize;
+        let y2 = chunk[3].to_digit(10).unwrap() as usize;
 
-        if x1.is_none() || y1.is_none() || x2.is_none() || y2.is_none() {
-            return false;
-        }
+        let from_sq = Board::coord_to_square(y1, x1);
+        let to_sq = Board::coord_to_square(y2, x2);
 
-        let from_col = x1.unwrap() as usize;
-        let from_row = y1.unwrap() as usize;
-        let to_col = x2.unwrap() as usize;
-        let to_row = y2.unwrap() as usize;
+        // Kiểm tra xem ô xuất phát có quân cờ không
+        let piece = match board.piece_at(from_sq) {
+            Some(p) => p,
+            None => return false, // Lỗi: Không có quân cờ ở tọa độ này
+        };
 
-        let from_sq = Board::coord_to_square(from_row, from_col);
-        let to_sq = Board::coord_to_square(to_row, to_col);
-
-        if board.piece_at(from_sq).is_none() {
-            return false;
+        // FIX LỖI SAI LƯỢT: Quân cờ phải thuộc về phe đang đến lượt
+        if piece.color != board.side_to_move {
+            return false; // Lỗi: File kỳ phổ bị mất/nhảy nước đi
         }
 
         let is_capture = !board.is_empty(to_sq);
         let m = Move::new(from_sq, to_sq, is_capture);
 
+        // Tính Policy Index và gán FEN
         let fen = board.to_fen();
         let policy_index = move_to_index(m);
+        let current_value = if board.side_to_move == Color::Red { red_score } else { -red_score };
 
-        let current_value = if board.side_to_move == Color::Red {
-            red_score
-        } else {
-            -red_score
-        };
-
-        if let Err(_) = writeln!(writer, "{},{},{}", fen, policy_index, current_value) {
-            return false;
-        }
+        // Ghi tạm vào RAM thay vì ghi trực tiếp ra File
+        temp_lines.push(format!("{},{},{}", fen, policy_index, current_value));
 
         board.make_move(m);
+    }
+
+    // 4. LƯU VÀO FILE (Chỉ lưu khi TOÀN BỘ ván cờ đã được parse thành công)
+    for line in temp_lines {
+        if let Err(_) = writeln!(writer, "{}", line) {
+            return false;
+        }
     }
 
     true
