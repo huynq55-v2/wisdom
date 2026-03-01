@@ -223,39 +223,99 @@ fn negamax(
     let moving_side = board.side_to_move;
     let mut has_legal_moves = false;
 
-    // === Algorithm 9: Staged Evaluation (Merged for Policy-Driven Search) ===
-    let mut all_moves = board.generate_captures();
-    all_moves.append(&mut board.generate_quiets());
+    // =========================================================
+    // PHASE 1: Captures only (sorted by MVV-LVA, early cutoff)
+    // =========================================================
+    let mut captures = board.generate_captures();
+    captures.sort_by_cached_key(|&m| -mvv_lva(board, m));
 
-    // Sort all moves: no policy at internal nodes, use MVV-LVA (CPU-only)
-    all_moves.sort_by_cached_key(|&m| {
-        if board.piece_at(m.to_sq()).is_some() {
-            -mvv_lva(board, m) - 1000000
-        } else {
-            0
-        }
-    });
-
-    // TT move to front
+    // TT move to front of captures
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = all_moves
+        if let Some(pos) = captures
             .iter()
             .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
         {
-            all_moves.swap(0, pos);
+            captures.swap(0, pos);
         }
     }
 
-    for m in &all_moves {
+    for m in &captures {
+        let undo = board.make_move(*m);
+
+        if board.kings_facing() || board.is_in_check(moving_side) {
+            board.unmake_move(*m, undo);
+            continue;
+        }
+
+        has_legal_moves = true;
+        let gives_check = board.is_in_check(moving_side.opposite());
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set: 0,
+            is_reversible: false,
+        });
+
+        let score = -negamax(
+            board,
+            depth - 1,
+            ply + 1,
+            -beta,
+            -alpha,
+            tt,
+            history,
+            eval_tx,
+        );
+
+        history.pop();
+        board.unmake_move(*m, undo);
+
+        if score > best_score {
+            best_score = score;
+            best_move = Some(*m);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            tt.record(
+                board.zobrist_key,
+                depth,
+                ply,
+                best_score,
+                crate::tt::FLAG_BETA,
+                best_move,
+            );
+            return best_score;
+        }
+    }
+
+    // =========================================================
+    // PHASE 2: Quiets (only if no beta cutoff during captures)
+    // =========================================================
+    let quiets = board.generate_quiets();
+
+    // TT move to front of quiets
+    let mut quiets = quiets;
+    if let Some(t_mv) = tt_move {
+        if let Some(pos) = quiets
+            .iter()
+            .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
+        {
+            quiets.swap(0, pos);
+        }
+    }
+
+    for m in &quiets {
         let piece = board.piece_at(m.from_sq()).unwrap();
         let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
             let (from_row, _) = Board::square_to_coord(m.from_sq());
             let (to_row, _) = Board::square_to_coord(m.to_sq());
             from_row == to_row
         };
-        let is_capture = board.piece_at(m.to_sq()).is_some();
 
-        let pre_threats = if is_reversible && !is_capture {
+        let pre_threats = if is_reversible {
             board.get_unprotected_threats(moving_side)
         } else {
             0
@@ -269,11 +329,9 @@ fn negamax(
         }
 
         has_legal_moves = true;
-
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = depth - 1;
 
-        let chased_set = if is_reversible && !gives_check && !is_capture {
+        let chased_set = if is_reversible && !gives_check {
             let post_threats = board.get_unprotected_threats(moving_side);
             post_threats & !pre_threats
         } else {
@@ -284,12 +342,12 @@ fn negamax(
             hash: board.zobrist_key,
             is_check: gives_check,
             chased_set,
-            is_reversible: is_reversible && !is_capture,
+            is_reversible,
         });
 
         let score = -negamax(
             board,
-            next_depth,
+            depth - 1,
             ply + 1,
             -beta,
             -alpha,
