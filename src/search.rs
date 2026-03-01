@@ -469,11 +469,10 @@ pub fn search_best_move_parallel(
             let bs = &best_score_global;
 
             s.spawn(move || {
-                // Thread 0 searches the full depth.
-                // Helper threads search shallower depths to rapidly populate the TT
-                // and guide the main thread without blowing up the node count.
-                let offset = (thread_id as u8) % 3; // offsets: 0, 1, 2
-                let thread_depth = if depth > offset { depth - offset } else { 1 };
+                // BUG FIX 3: Lazy SMP - helper threads must search at EQUAL or DEEPER depth
+                // to stay alive and populate TT. Shallower threads die instantly and waste cores.
+                // Thread 0: depth, Thread 1: depth+1, Thread 2: depth, Thread 3: depth+1, ...
+                let thread_depth = depth + (thread_id as u8 % 2);
 
                 let m = search_best_move(
                     &mut local_board,
