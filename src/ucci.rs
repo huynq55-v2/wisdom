@@ -115,7 +115,7 @@ pub fn ucci_loop() {
     let mut board = Board::new();
     board.set_initial_position();
 
-    let mut tt = crate::tt::TranspositionTable::new(64);
+    let tt = crate::tt::TranspositionTable::new(64);
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {

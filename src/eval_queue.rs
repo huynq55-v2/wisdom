@@ -1,12 +1,11 @@
 use crate::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet};
 use burn::prelude::*;
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Sender, bounded};
 use std::thread;
-use std::time::{Duration, Instant};
 
 pub struct EvalRequest {
     pub tensor_data: [f32; TENSOR_SIZE],
-    pub response_tx: Sender<f32>,
+    pub response_tx: Sender<(f32, Vec<f32>)>,
 }
 
 pub struct EvalQueue {
@@ -27,7 +26,6 @@ impl EvalQueue {
         thread::spawn(move || {
             let mut batch_inputs = Vec::with_capacity(batch_size * TENSOR_SIZE);
             let mut response_channels = Vec::with_capacity(batch_size);
-            let timeout = Duration::from_millis(timeout_ms);
 
             loop {
                 batch_inputs.clear();
@@ -71,19 +69,21 @@ impl EvalQueue {
                     BOARD_W,
                 ]);
 
-                // Forward pass on GPU
-                let predictions = model.forward(inputs);
+                // Forward pass on GPU (value, policy_logits)
+                let (pred_value, pred_policy) = model.forward(inputs);
 
-                // println!("EvalQueue: reading predictions back to CPU...");
                 // Read values back
-                // This call may block waiting for GPU synchronization
-                let values = predictions.into_data().to_vec::<f32>().unwrap();
-
-                // println!("EvalQueue: dispatching {} values", values.len());
+                let values = pred_value.into_data().to_vec::<f32>().unwrap();
+                let policies = pred_policy.into_data().to_vec::<f32>().unwrap();
 
                 // Dispatch results to waiting threads
                 for (i, resp_tx) in response_channels.drain(..).enumerate() {
-                    let _ = resp_tx.send(values[i]);
+                    let v = values[i];
+                    // Slice the 8100 elements for this specific item in the batch
+                    let policy_start = i * crate::nn::ACTION_SPACE;
+                    let policy_end = policy_start + crate::nn::ACTION_SPACE;
+                    let p = policies[policy_start..policy_end].to_vec();
+                    let _ = resp_tx.send((v, p));
                 }
             }
         });

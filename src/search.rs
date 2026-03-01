@@ -7,6 +7,14 @@ pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
 pub fn evaluate_node(board: &Board, eval_tx: Option<&Sender<EvalRequest>>) -> i32 {
+    let (val, _) = evaluate_node_with_policy(board, eval_tx);
+    val
+}
+
+pub fn evaluate_node_with_policy(
+    board: &Board,
+    eval_tx: Option<&Sender<EvalRequest>>,
+) -> (i32, Option<Vec<f32>>) {
     if let Some(tx_queue) = eval_tx {
         let tensor = crate::nn::board_to_tensor(board);
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -16,12 +24,11 @@ pub fn evaluate_node(board: &Board, eval_tx: Option<&Sender<EvalRequest>>) -> i3
                 response_tx: tx,
             })
             .unwrap();
-        // println!("search thread: sent req, waiting for resp...");
-        let nn_value = rx.recv().unwrap();
-        // println!("search thread: recv resp {}", nn_value);
-        (nn_value * 10000.0) as i32
+
+        let (nn_value, policy) = rx.recv().unwrap();
+        ((nn_value * 10000.0) as i32, Some(policy))
     } else {
-        board.evaluate()
+        (board.evaluate(), None)
     }
 }
 
@@ -44,22 +51,64 @@ pub fn search_best_move(
 
     let moving_side = board.side_to_move;
 
-    // === Algorithm 9: Staged Evaluation ===
-    // Phase 1: Process captures first (no chase computation needed)
-    let mut captures = board.generate_captures();
-    captures.sort_by_key(|&m| -mvv_lva(board, m));
+    // Evaluate root policy for move ordering if NN is available
+    let mut root_policy: Option<Vec<f32>> = None;
+    if depth > 0 {
+        let (_, p) = evaluate_node_with_policy(board, eval_tx);
+        root_policy = p;
+    }
 
-    // TT move to front of captures
+    // === Algorithm 9: Staged Evaluation (Merged for Policy-Driven Search) ===
+    let mut all_moves = board.generate_captures();
+    all_moves.append(&mut board.generate_quiets());
+
+    // Sort all moves by policy logits to prioritize promising branches
+    if let Some(ref policy) = root_policy {
+        all_moves.sort_by(|a, b| {
+            let idx_a = crate::nn::move_to_index(*a);
+            let idx_b = crate::nn::move_to_index(*b);
+            let logit_a = policy[idx_a];
+            let logit_b = policy[idx_b];
+            logit_b
+                .partial_cmp(&logit_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    } else {
+        // Fallback if no policy: Captures first (sorted by MVV-LVA)
+        all_moves.sort_by_cached_key(|&m| {
+            if board.piece_at(m.to_sq()).is_some() {
+                -mvv_lva(board, m) - 1000000
+            } else {
+                0
+            }
+        });
+    }
+
+    // TT move to front
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = captures
+        if let Some(pos) = all_moves
             .iter()
             .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
         {
-            captures.swap(0, pos);
+            all_moves.swap(0, pos);
         }
     }
 
-    for m in &captures {
+    for m in &all_moves {
+        let piece = board.piece_at(m.from_sq()).unwrap();
+        let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
+            let (from_row, _) = Board::square_to_coord(m.from_sq());
+            let (to_row, _) = Board::square_to_coord(m.to_sq());
+            from_row == to_row
+        };
+        let is_capture = board.piece_at(m.to_sq()).is_some();
+
+        let pre_threats = if is_reversible && !is_capture {
+            board.get_unprotected_threats(moving_side)
+        } else {
+            0
+        };
+
         let undo = board.make_move(*m);
 
         if board.kings_facing() || board.is_in_check(moving_side) {
@@ -68,13 +117,20 @@ pub fn search_best_move(
         }
 
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
+        let next_depth = depth - 1;
+
+        let chased_set = if is_reversible && !gives_check && !is_capture {
+            let post_threats = board.get_unprotected_threats(moving_side);
+            post_threats & !pre_threats
+        } else {
+            0
+        };
 
         history.push(HistoryEntry {
             hash: board.zobrist_key,
             is_check: gives_check,
-            chased_set: 0, // Captures are never reversible
-            is_reversible: false,
+            chased_set,
+            is_reversible: is_reversible && !is_capture,
         });
 
         let score = -negamax(
@@ -97,78 +153,6 @@ pub fn search_best_move(
         }
     }
 
-    // Phase 2: Process quiet moves (only if no beta cutoff during captures)
-    if alpha < beta {
-        let mut quiets = board.generate_quiets();
-
-        // TT move to front of quiets
-        if let Some(t_mv) = tt_move {
-            if let Some(pos) = quiets
-                .iter()
-                .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
-            {
-                quiets.swap(0, pos);
-            }
-        }
-
-        for m in &quiets {
-            let piece = board.piece_at(m.from_sq()).unwrap();
-            let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
-                let (from_row, _) = Board::square_to_coord(m.from_sq());
-                let (to_row, _) = Board::square_to_coord(m.to_sq());
-                from_row == to_row
-            };
-            let pre_threats = if is_reversible {
-                board.get_unprotected_threats(moving_side)
-            } else {
-                0
-            };
-
-            let undo = board.make_move(*m);
-
-            if board.kings_facing() || board.is_in_check(moving_side) {
-                board.unmake_move(*m, undo);
-                continue;
-            }
-
-            let gives_check = board.is_in_check(moving_side.opposite());
-            let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
-
-            let chased_set = if is_reversible && !gives_check {
-                let post_threats = board.get_unprotected_threats(moving_side);
-                post_threats & !pre_threats
-            } else {
-                0
-            };
-
-            history.push(HistoryEntry {
-                hash: board.zobrist_key,
-                is_check: gives_check,
-                chased_set,
-                is_reversible,
-            });
-
-            let score = -negamax(
-                board,
-                next_depth,
-                1,
-                -beta,
-                -alpha,
-                tt,
-                &mut history,
-                eval_tx,
-            );
-
-            history.pop();
-            board.unmake_move(*m, undo);
-
-            if score > alpha {
-                alpha = score;
-                best_move = Some(*m);
-            }
-        }
-    }
-
     if let Some(bm) = best_move {
         tt.record(
             board.zobrist_key,
@@ -182,8 +166,6 @@ pub fn search_best_move(
 
     // Fallback: if no best_move found, pick first legal move
     if best_move.is_none() {
-        let mut all_moves = board.generate_captures();
-        all_moves.append(&mut board.generate_quiets());
         for m in &all_moves {
             let undo = board.make_move(*m);
             let legal = !board.kings_facing() && !board.is_in_check(moving_side);
@@ -228,6 +210,13 @@ fn negamax(
         return quiescence(board, alpha, beta, eval_tx);
     }
 
+    // Internal Node Policy Evaluation
+    let mut node_policy: Option<Vec<f32>> = None;
+    if eval_tx.is_some() {
+        let (_, p) = evaluate_node_with_policy(board, eval_tx);
+        node_policy = p;
+    }
+
     let mut tt_move = None;
     if let Some((score, best_tt)) = tt.probe(board.zobrist_key, depth, ply, alpha, beta) {
         if score != i32::MIN {
@@ -241,92 +230,52 @@ fn negamax(
     let moving_side = board.side_to_move;
     let mut has_legal_moves = false;
 
-    // === Algorithm 9: Staged Evaluation ===
-    // Phase 1: Process captures (no chase computation, likely to cause beta cutoff)
-    let mut captures = board.generate_captures();
-    captures.sort_by_key(|&m| -mvv_lva(board, m));
+    // === Algorithm 9: Staged Evaluation (Merged for Policy-Driven Search) ===
+    let mut all_moves = board.generate_captures();
+    all_moves.append(&mut board.generate_quiets());
 
-    // TT move to front of captures
-    if let Some(t_mv) = tt_move {
-        if let Some(pos) = captures
-            .iter()
-            .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
-        {
-            captures.swap(0, pos);
-        }
-    }
-
-    for m in &captures {
-        let undo = board.make_move(*m);
-
-        if board.kings_facing() || board.is_in_check(moving_side) {
-            board.unmake_move(*m, undo);
-            continue;
-        }
-
-        has_legal_moves = true;
-
-        let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
-
-        history.push(HistoryEntry {
-            hash: board.zobrist_key,
-            is_check: gives_check,
-            chased_set: 0,
-            is_reversible: false,
+    // Sort all moves by internal policy logits to prioritize promising branches
+    if let Some(ref policy) = node_policy {
+        all_moves.sort_by(|a, b| {
+            let idx_a = crate::nn::move_to_index(*a);
+            let idx_b = crate::nn::move_to_index(*b);
+            let logit_a = policy[idx_a];
+            let logit_b = policy[idx_b];
+            logit_b
+                .partial_cmp(&logit_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-
-        let score = -negamax(
-            board,
-            next_depth,
-            ply + 1,
-            -beta,
-            -alpha,
-            tt,
-            history,
-            eval_tx,
-        );
-
-        history.pop();
-        board.unmake_move(*m, undo);
-
-        if score > best_score {
-            best_score = score;
-            best_move = Some(*m);
-        }
-        if score > alpha {
-            alpha = score;
-        }
-        if alpha >= beta {
-            // Beta cutoff during captures — skip quiet move generation entirely!
-            let flag = crate::tt::FLAG_BETA;
-            tt.record(board.zobrist_key, depth, ply, best_score, flag, best_move);
-            return best_score;
-        }
+    } else {
+        // Fallback if no policy: Captures first (sorted by MVV-LVA)
+        all_moves.sort_by_cached_key(|&m| {
+            if board.piece_at(m.to_sq()).is_some() {
+                -mvv_lva(board, m) - 1000000
+            } else {
+                0
+            }
+        });
     }
 
-    // Phase 2: Process quiet moves (expensive chase computation only here)
-    let mut quiets = board.generate_quiets();
-
-    // TT move to front of quiets
+    // TT move to front
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = quiets
+        if let Some(pos) = all_moves
             .iter()
             .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
         {
-            quiets.swap(0, pos);
+            all_moves.swap(0, pos);
         }
     }
 
-    for m in &quiets {
+    for m in &all_moves {
         let piece = board.piece_at(m.from_sq()).unwrap();
         let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
             let (from_row, _) = Board::square_to_coord(m.from_sq());
             let (to_row, _) = Board::square_to_coord(m.to_sq());
             from_row == to_row
         };
+        let is_capture = board.piece_at(m.to_sq()).is_some();
 
-        let pre_threats = if is_reversible {
+        let pre_threats = if is_reversible && !is_capture {
             board.get_unprotected_threats(moving_side)
         } else {
             0
@@ -342,9 +291,9 @@ fn negamax(
         has_legal_moves = true;
 
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
+        let next_depth = depth - 1;
 
-        let chased_set = if is_reversible && !gives_check {
+        let chased_set = if is_reversible && !gives_check && !is_capture {
             let post_threats = board.get_unprotected_threats(moving_side);
             post_threats & !pre_threats
         } else {
@@ -355,7 +304,7 @@ fn negamax(
             hash: board.zobrist_key,
             is_check: gives_check,
             chased_set,
-            is_reversible,
+            is_reversible: is_reversible && !is_capture,
         });
 
         let score = -negamax(

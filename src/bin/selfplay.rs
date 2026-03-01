@@ -5,7 +5,7 @@ use burn::{
         dataset::Dataset,
     },
     module::AutodiffModule,
-    nn::loss::MseLoss,
+    nn::loss::{CrossEntropyLossConfig, MseLoss},
     optim::AdamConfig,
     prelude::*,
     record::Recorder,
@@ -29,7 +29,8 @@ use wisdom::tt::TranspositionTable;
 #[derive(Clone, Debug)]
 pub struct SelfPlayItem {
     pub fen: String,
-    pub value: f32, // -1.0 to 1.0
+    pub value: f32,    // -1.0 to 1.0
+    pub policy: usize, // best move index
 }
 
 pub struct RAMDataset {
@@ -48,14 +49,16 @@ impl Dataset<SelfPlayItem> for RAMDataset {
 #[derive(Debug)]
 pub struct XiangqiBatch<B: Backend> {
     pub inputs: Tensor<B, 4>,
-    pub targets: Tensor<B, 2>,
+    pub targets_v: Tensor<B, 2>,
+    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
 }
 
 impl<B: Backend> Clone for XiangqiBatch<B> {
     fn clone(&self) -> Self {
         Self {
             inputs: self.inputs.clone(),
-            targets: self.targets.clone(),
+            targets_v: self.targets_v.clone(),
+            targets_p: self.targets_p.clone(),
         }
     }
 }
@@ -76,7 +79,8 @@ impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
         let batch_size = items.len();
 
         let mut inputs_flat = Vec::with_capacity(batch_size * TENSOR_SIZE);
-        let mut targets_flat = Vec::with_capacity(batch_size);
+        let mut targets_v_flat = Vec::with_capacity(batch_size);
+        let mut targets_p_flat = Vec::with_capacity(batch_size);
 
         for item in items {
             let mut board = Board::new();
@@ -84,16 +88,24 @@ impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
             let tensor = board_to_tensor(&board);
 
             inputs_flat.extend_from_slice(&tensor);
-            targets_flat.push(item.value);
+            targets_v_flat.push(item.value);
+            targets_p_flat.push(item.policy as i32);
         }
 
         let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), &self.device)
             .reshape([batch_size, NUM_PLANES, BOARD_H, BOARD_W]);
 
-        let targets = Tensor::<B, 1>::from_data(targets_flat.as_slice(), &self.device)
+        let targets_v = Tensor::<B, 1>::from_data(targets_v_flat.as_slice(), &self.device)
             .reshape([batch_size, 1]);
 
-        XiangqiBatch { inputs, targets }
+        let targets_p =
+            Tensor::<B, 1, burn::tensor::Int>::from_data(targets_p_flat.as_slice(), &self.device);
+
+        XiangqiBatch {
+            inputs,
+            targets_v,
+            targets_p,
+        }
     }
 }
 
@@ -105,21 +117,27 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep<XiangqiBatch<B>, Regre
     for XiangqiNet<B>
 {
     fn step(&self, batch: XiangqiBatch<B>) -> TrainOutput<RegressionOutput<B>> {
-        let predictions = self.forward(batch.inputs);
+        let (pred_value, pred_policy) = self.forward(batch.inputs);
 
-        let loss = MseLoss::new().forward(
-            predictions.clone(),
-            batch.targets.clone(),
+        let loss_v = MseLoss::new().forward(
+            pred_value.clone(),
+            batch.targets_v.clone(),
             burn::nn::loss::Reduction::Mean,
         );
+
+        let loss_p = CrossEntropyLossConfig::new()
+            .init(&batch.targets_p.device())
+            .forward(pred_policy.clone(), batch.targets_p.clone());
+
+        let loss = loss_v + loss_p;
 
         TrainOutput::new(
             self,
             loss.backward(),
             RegressionOutput {
                 loss,
-                output: predictions,
-                targets: batch.targets,
+                output: pred_value,
+                targets: batch.targets_v,
             },
         )
     }
@@ -127,18 +145,24 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep<XiangqiBatch<B>, Regre
 
 impl<B: Backend> ValidStep<XiangqiBatch<B>, RegressionOutput<B>> for XiangqiNet<B> {
     fn step(&self, batch: XiangqiBatch<B>) -> RegressionOutput<B> {
-        let predictions = self.forward(batch.inputs);
+        let (pred_value, pred_policy) = self.forward(batch.inputs);
 
-        let loss = MseLoss::new().forward(
-            predictions.clone(),
-            batch.targets.clone(),
+        let loss_v = MseLoss::new().forward(
+            pred_value.clone(),
+            batch.targets_v.clone(),
             burn::nn::loss::Reduction::Mean,
         );
 
+        let loss_p = CrossEntropyLossConfig::new()
+            .init(&batch.targets_p.device())
+            .forward(pred_policy.clone(), batch.targets_p.clone());
+
+        let loss = loss_v + loss_p;
+
         RegressionOutput {
             loss,
-            output: predictions,
-            targets: batch.targets,
+            output: pred_value,
+            targets: batch.targets_v,
         }
     }
 }
@@ -181,8 +205,8 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     let mut history = Vec::new();
     let mut rng = rand::thread_rng();
 
-    // Store (fen, search_value, side_to_move_at_that_position)
-    let mut game_records: Vec<(String, f32, Color)> = Vec::new();
+    // Store (fen, search_value, side_to_move_at_that_position, policy_index)
+    let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
     let mut result = GameResult::Draw;
 
@@ -229,7 +253,12 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
         let normalized_score = (score as f32 / 10000.0).clamp(-1.0, 1.0);
         let current_side = board.side_to_move;
 
-        game_records.push((board.to_fen(), normalized_score, current_side));
+        game_records.push((
+            board.to_fen(),
+            normalized_score,
+            current_side,
+            wisdom::nn::move_to_index(best_move),
+        ));
 
         // 2. Epsilon-greedy: Choose move
         let mut chosen_move = best_move;
@@ -301,9 +330,10 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             // All positions get blended value: 0.5 * search + 0.5 * 0.0
             game_records
                 .into_iter()
-                .map(|(fen, search_val, _side)| SelfPlayItem {
+                .map(|(fen, search_val, _side, policy)| SelfPlayItem {
                     fen,
                     value: search_val * 0.5, // blend search with draw (0.0)
+                    policy,
                 })
                 .collect()
         }
@@ -314,7 +344,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
 
             game_records
                 .into_iter()
-                .map(|(fen, search_val, side)| {
+                .map(|(fen, search_val, side, policy)| {
                     // Z from this position's perspective:
                     // If side == losing_side => Z = -1.0 (this position was losing)
                     // If side != losing_side => Z = +1.0 (this position was winning)
@@ -323,6 +353,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
                     SelfPlayItem {
                         fen,
                         value: search_val * 0.5 + z * 0.5, // blend 50% search + 50% ground truth
+                        policy,
                     }
                 })
                 .collect()
@@ -400,7 +431,7 @@ fn main() {
         // Destroy the eval queue thread to free the GPU for Burn's Learner
         drop(eval_tx);
         drop(eval_queue);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(1000)); // <-- Tăng lên 1 giây để VRAM GPU kịp giải phóng hết rác của 15.000 ván cờ
 
         let mut iteration_data = iteration_data.into_inner().unwrap();
 
@@ -424,15 +455,15 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(256)
+            .batch_size(32) // <-- GIẢM TỪ 256 XUỐNG 32 ĐỂ CỨU GPU
             .shuffle(42)
-            .num_workers(2)
+            .num_workers(1) // <-- GIẢM SỐ LUỒNG XUỐNG 1 ĐỂ TRÁNH NGẼN RAM CỤC BỘ
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-            .batch_size(256)
+            .batch_size(32) // <-- GIẢM TỪ 256 XUỐNG 32
             .shuffle(42)
-            .num_workers(2)
+            .num_workers(1)
             .build(RAMDataset { items: valid_data });
 
         let optim = AdamConfig::new();

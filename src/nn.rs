@@ -10,6 +10,33 @@ pub const NUM_PLANES: usize = 15;
 pub const BOARD_H: usize = 10;
 pub const BOARD_W: usize = 9;
 pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1350
+pub const ACTION_SPACE: usize = 90 * 90; // 8100
+
+// ============================================================
+// Action Mapping
+// ============================================================
+
+/// Convert a Move to an Index (0..8099) for the Policy Head
+pub fn move_to_index(m: crate::r#move::Move) -> usize {
+    let from_sq = m.from_sq() as usize;
+    let to_sq = m.to_sq() as usize;
+
+    let from_dense = (from_sq / 16) * 9 + (from_sq % 16);
+    let to_dense = (to_sq / 16) * 9 + (to_sq % 16);
+
+    from_dense * 90 + to_dense
+}
+
+/// Convert an Index from the Policy Head back to a (from_sq, to_sq) tuple
+pub fn index_to_move(index: usize) -> (u8, u8) {
+    let from_dense = index / 90;
+    let to_dense = index % 90;
+
+    let from_sq = (from_dense / 9) * 16 + (from_dense % 9);
+    let to_sq = (to_dense / 9) * 16 + (to_dense % 9);
+
+    (from_sq as u8, to_sq as u8)
+}
 
 // ============================================================
 // Board → Tensor Conversion
@@ -86,7 +113,8 @@ pub struct XiangqiNet<B: Backend> {
     conv3: Conv2d<B>,
     bn3: BatchNorm<B, 2>,
     fc1: Linear<B>,
-    fc2: Linear<B>,
+    policy_head: Linear<B>,
+    value_head: Linear<B>,
     relu: Relu,
 }
 
@@ -110,15 +138,16 @@ impl XiangqiNetConfig {
                 .init(device),
             bn3: BatchNormConfig::new(128).init(device),
             fc1: LinearConfig::new(128, 64).init(device),
-            fc2: LinearConfig::new(64, 1).init(device),
+            policy_head: LinearConfig::new(64, ACTION_SPACE).init(device),
+            value_head: LinearConfig::new(64, 1).init(device),
             relu: Relu::new(),
         }
     }
 }
 
 impl<B: Backend> XiangqiNet<B> {
-    /// Forward pass: [B, 15, 10, 9] → [B, 1] (value in [-1, 1])
-    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 2> {
+    /// Forward pass: [B, 15, 10, 9] → (Value [B, 1], Policy [B, 8100])
+    pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         // Conv block 1
         let x = self.conv1.forward(x);
         let x = self.bn1.forward(x);
@@ -141,13 +170,18 @@ impl<B: Backend> XiangqiNet<B> {
         let x = x.mean_dim(2); // [B, 128, 1]
         let x = x.reshape([batch, channels]); // [B, 128]
 
-        // Value head
+        // Shared FC
         let x = self.fc1.forward(x);
         let x = self.relu.forward(x);
-        let x = self.fc2.forward(x); // [B, 1]
 
-        // Tanh to bound output to [-1, 1]
-        x.tanh()
+        // Policy head: [B, 64] -> [B, 8100]
+        let logits_policy = self.policy_head.forward(x.clone());
+
+        // Value head: [B, 64] -> [B, 1]
+        let value = self.value_head.forward(x);
+        let value = value.tanh(); // Squash value to [-1, 1]
+
+        (value, logits_policy)
     }
 }
 
@@ -186,12 +220,12 @@ mod tests {
 
         // Create a dummy batch of 4 boards
         let dummy = Tensor::<TestBackend, 4>::zeros([4, NUM_PLANES, BOARD_H, BOARD_W], &device);
-        let output = model.forward(dummy);
+        let (value, _policy) = model.forward(dummy);
 
-        assert_eq!(output.dims(), [4, 1]);
+        assert_eq!(value.dims(), [4, 1]);
 
         // Values should be in [-1, 1] due to tanh
-        let data = output.to_data();
+        let data = value.to_data();
         for val in data.iter::<f32>() {
             assert!(val >= -1.0 && val <= 1.0, "Output {} out of range", val);
         }

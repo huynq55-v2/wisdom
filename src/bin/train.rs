@@ -109,7 +109,7 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep<XiangqiBatch<B>, Regre
     for XiangqiNet<B>
 {
     fn step(&self, batch: XiangqiBatch<B>) -> TrainOutput<RegressionOutput<B>> {
-        let predictions = self.forward(batch.inputs);
+        let (predictions, _) = self.forward(batch.inputs);
 
         let loss = MseLoss::new().forward(
             predictions.clone(),
@@ -131,7 +131,7 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep<XiangqiBatch<B>, Regre
 
 impl<B: Backend> ValidStep<XiangqiBatch<B>, RegressionOutput<B>> for XiangqiNet<B> {
     fn step(&self, batch: XiangqiBatch<B>) -> RegressionOutput<B> {
-        let predictions = self.forward(batch.inputs);
+        let (predictions, _) = self.forward(batch.inputs);
 
         let loss = MseLoss::new().forward(
             predictions.clone(),
