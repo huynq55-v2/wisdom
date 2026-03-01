@@ -1,7 +1,7 @@
 use macroquad::prelude::*;
 use wisdom::board::{Board, Color as PieceColor, HistoryEntry, PieceType, RepetitionResult};
 use wisdom::r#move::Move;
-use wisdom::search::search_best_move;
+use wisdom::search::alphabeta_search_best_move;
 
 const SQUARE_SIZE: f32 = 60.0;
 const OFFSET_X: f32 = 50.0;
@@ -568,8 +568,13 @@ async fn main() {
                     game_over_message = "Checkmate!".into();
                     current_eval = Some(-20000);
                 } else {
-                    let (best_move, _) =
-                        search_best_move(&mut board, search_depth, &tt, &game_history, None);
+                    let (best_move, _) = alphabeta_search_best_move(
+                        &mut board,
+                        search_depth,
+                        &tt,
+                        &game_history,
+                        None,
+                    );
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
                     if game_history.len() >= 4 {

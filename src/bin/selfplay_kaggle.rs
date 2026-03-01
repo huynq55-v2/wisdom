@@ -20,7 +20,7 @@ use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::nn::board_to_tensor;
 use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig};
-use wisdom::search::{MATE_VALUE, search_best_move_parallel};
+use wisdom::search::{MATE_VALUE, alphabeta_search_best_move_parallel};
 use wisdom::tt::TranspositionTable;
 
 // ==========================================================
@@ -248,7 +248,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
         // 2. Tắt Lazy SMP bằng cách truyền num_threads = 1
         // 32 ván cờ x 1 luồng = 32 luồng. Quá hoàn hảo để nhét đầy Batch Size của GPU!
         let (best_move, score) =
-            search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
+            alphabeta_search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
 
         // Store FEN with the search score (will be overridden by ground truth later)
         let normalized_score = (score as f32 / 10000.0).clamp(-1.0, 1.0);

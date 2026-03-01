@@ -1,5 +1,6 @@
 pub mod board;
 pub mod eval_queue;
+pub mod mcts;
 pub mod r#move;
 pub mod movegen;
 pub mod nn;

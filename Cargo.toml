@@ -9,6 +9,7 @@ burn = { version = "0.16", features = ["wgpu", "ndarray", "train"] }
 crossbeam-channel = "0.5"
 rand = "0.8"
 burn-tch = "0.16"
+walkdir = "2.5.0"
 
 [[bin]]
 name = "gui"
@@ -25,3 +26,7 @@ path = "src/bin/selfplay_kaggle.rs"
 [[bin]]
 name = "train"
 path = "src/bin/train.rs"
+
+[[bin]]
+name = "build_dataset"
+path = "src/bin/build_dataset.rs"

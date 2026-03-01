@@ -1,7 +1,10 @@
 use crate::board::{Board, Color, Piece, PieceType};
+use crate::eval_queue::EvalQueue;
+use crate::mcts::MCTS;
 use crate::r#move::Move;
-use crate::search::search_best_move;
+use crate::search::alphabeta_search_best_move;
 use std::io::{self, BufRead};
+use std::sync::Arc;
 
 pub fn move_to_ucci_string(m: Move) -> String {
     let (from_row, from_col) = Board::square_to_coord(m.from_sq());
@@ -111,11 +114,21 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
     board.compute_zobrist_key();
 }
 
-pub fn ucci_loop() {
+pub fn ucci_loop_generic<B: burn::prelude::Backend>(
+    model: crate::nn::XiangqiNet<B>,
+    device: B::Device,
+) {
     let mut board = Board::new();
     board.set_initial_position();
 
     let tt = crate::tt::TranspositionTable::new(64);
+
+    // Start NN Eval Queue (automatically spawns background thread)
+    let eval_queue = EvalQueue::new(model, device, 32, 5);
+    // Store transmitter for MCTS
+    let eval_tx = eval_queue.tx.clone();
+
+    let mut mcts = MCTS::new(100_000); // Pre-allocate 100k nodes
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -162,12 +175,20 @@ pub fn ucci_loop() {
                 }
             }
             "go" => {
-                let mut depth = 4; // default
-                if tokens.len() > 2 && tokens[1] == "depth" {
-                    depth = tokens[2].parse().unwrap_or(4);
+                let mut simulations = 800; // default MCTS simulations
+                if tokens.len() > 2 {
+                    if tokens[1] == "simulations" {
+                        simulations = tokens[2].parse().unwrap_or(800);
+                    } else if tokens[1] == "depth" {
+                        // For backwards compatibility with standard UCCI GUIs
+                        // Map depth ~4 to 800 roughly
+                        let d: usize = tokens[2].parse().unwrap_or(4);
+                        simulations = d * 200;
+                    }
                 }
 
-                let (best_move, _) = search_best_move(&mut board, depth, &tt, &[], None);
+                // Call MCTS Search instead of Alpha-Beta
+                let best_move = mcts.search_best_move(&board, simulations, &eval_tx, &tt, 4);
                 let move_str = move_to_ucci_string(best_move);
                 println!("bestmove {}", move_str);
             }

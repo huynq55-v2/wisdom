@@ -34,7 +34,7 @@ pub fn evaluate_node_with_policy(
     }
 }
 
-pub fn search_best_move(
+pub fn alphabeta_search_best_move(
     board: &mut Board,
     depth: u8,
     tt: &crate::tt::TranspositionTable,
@@ -440,7 +440,7 @@ fn quiescence(
     alpha
 }
 
-pub fn search_best_move_parallel(
+pub fn alphabeta_search_best_move_parallel(
     board: &Board,
     depth: u8,
     tt: &crate::tt::TranspositionTable,
@@ -467,7 +467,7 @@ pub fn search_best_move_parallel(
                 // Thread 0: depth, Thread 1: depth+1, Thread 2: depth, Thread 3: depth+1, ...
                 let thread_depth = depth + (thread_id as u8 % 2);
 
-                let (m, score) = search_best_move(
+                let (m, score) = alphabeta_search_best_move(
                     &mut local_board,
                     thread_depth,
                     tt,

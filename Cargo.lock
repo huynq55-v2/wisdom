@@ -5287,6 +5287,7 @@ dependencies = [
  "crossbeam-channel",
  "macroquad",
  "rand 0.8.5",
+ "walkdir",
 ]
 
 [[package]]
