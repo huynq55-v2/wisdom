@@ -242,7 +242,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
 
         // 1. Giảm Depth xuống 2 trong những Iteration đầu tiên!
         // (Khi nào NN có Policy Head để Move Ordering, bạn mới nên nâng lên 3 hoặc 4)
-        let depth = 2;
+        let depth = 3;
 
         // 2. Tắt Lazy SMP bằng cách truyền num_threads = 1
         // 32 ván cờ x 1 luồng = 32 luồng. Quá hoàn hảo để nhét đầy Batch Size của GPU!
@@ -373,11 +373,34 @@ fn main() {
 
     let device = burn::backend::wgpu::WgpuDevice::default();
     let config = XiangqiNetConfig::new();
-    let mut model = config.init::<MyBackend>(&device);
 
-    let num_iterations = 10;
+    // CỐ GẮNG LOAD MODEL CŨ
+    let checkpoint_path = "../../xiangqi_net_latest";
+    let record_result = burn::record::CompactRecorder::new().load(checkpoint_path.into(), &device);
+
+    let mut model = match record_result {
+        Ok(record) => {
+            println!(
+                "✅ Found existing checkpoint! Loading model from '{}'...",
+                checkpoint_path
+            );
+            config.init::<MyBackend>(&device).load_record(record)
+        }
+        Err(_) => {
+            println!(
+                "⚠️ No checkpoint found or failed to load. Initializing a NEW random model..."
+            );
+            config.init::<MyBackend>(&device)
+        }
+    };
+
+    let num_iterations = 50;
     let games_per_iteration = 100;
     let concurrent_games = 128; // <-- TĂNG LÊN ĐỂ GPU LUÔN BỊ LÀM ĐẦY BATCH SIZE
+
+    // Khởi tạo Replay Buffer lưu tối đa khoảng 100,000 positions
+    let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
+    let max_buffer_size = 100_000;
 
     for iteration in 1..=num_iterations {
         println!("============================================================");
@@ -435,21 +458,31 @@ fn main() {
 
         let mut iteration_data = iteration_data.into_inner().unwrap();
 
+        // THÊM DATA MỚI VÀO REPLAY BUFFER
+        replay_buffer.append(&mut iteration_data);
+
+        // NẾU TRÀN BUFFER, XÓA BỚT DATA CŨ NHẤT (Giữ lại các ván cờ chất lượng/mới)
+        if replay_buffer.len() > max_buffer_size {
+            let excess = replay_buffer.len() - max_buffer_size;
+            replay_buffer.drain(0..excess);
+        }
+
         // 2. TRAINING PHASE
         println!("============================================================");
         println!(
-            " Iteration {} / {} - Training Model on {} positions",
+            " Iteration {} / {} - Training Model on {} positions (Replay Buffer)",
             iteration,
             num_iterations,
-            iteration_data.len()
+            replay_buffer.len()
         );
         println!("============================================================");
 
         use rand::seq::SliceRandom;
-        iteration_data.shuffle(&mut rand::thread_rng());
-        let split_idx = (iteration_data.len() as f32 * 0.9) as usize;
-        let train_data = iteration_data[0..split_idx].to_vec();
-        let valid_data = iteration_data[split_idx..].to_vec();
+        let mut train_dataset = replay_buffer.clone();
+        train_dataset.shuffle(&mut rand::thread_rng());
+        let split_idx = (train_dataset.len() as f32 * 0.9) as usize;
+        let train_data = train_dataset[0..split_idx].to_vec();
+        let valid_data = train_dataset[split_idx..].to_vec();
 
         let batcher_train = XiangqiBatcher::<MyAutodiffBackend>::new(device.clone());
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
