@@ -483,31 +483,47 @@ async fn main() {
                                 selected_sq = None;
                                 legal_moves.clear();
 
-                                match board.judge_repetition(&game_history, game_history.len()) {
-                                    RepetitionResult::Win => {
-                                        game_over = true;
-                                        game_over_message = "Rule Violation: You Lose!".into();
-                                        current_eval = Some(-20000);
-                                    }
-                                    RepetitionResult::Loss => {
-                                        game_over = true;
-                                        game_over_message = "Opponent Violation: You Win!".into();
-                                        current_eval = Some(20000);
-                                    }
-                                    RepetitionResult::Draw => {
-                                        game_over = true;
-                                        game_over_message = "Draw by Repetition!".into();
-                                        current_eval = Some(0);
-                                    }
-                                    RepetitionResult::Undecided => {
-                                        let all = get_legal_moves(&mut board);
-                                        if all.is_empty() {
+                                if game_history.len() >= 4 {
+                                    match board.judge_repetition(
+                                        &game_history,
+                                        game_history.len(),
+                                        2,
+                                    ) {
+                                        RepetitionResult::Win => {
                                             game_over = true;
-                                            game_over_message = "Checkmate!".into();
+                                            game_over_message = "Rule Violation: You Lose!".into();
                                             current_eval = Some(-20000);
-                                        } else {
-                                            current_eval = Some(board.evaluate());
                                         }
+                                        RepetitionResult::Loss => {
+                                            game_over = true;
+                                            game_over_message =
+                                                "Opponent Violation: You Win!".into();
+                                            current_eval = Some(20000);
+                                        }
+                                        RepetitionResult::Draw => {
+                                            game_over = true;
+                                            game_over_message = "Draw by Repetition!".into();
+                                            current_eval = Some(0);
+                                        }
+                                        RepetitionResult::Undecided => {
+                                            let all = get_legal_moves(&mut board);
+                                            if all.is_empty() {
+                                                game_over = true;
+                                                game_over_message = "Checkmate!".into();
+                                                current_eval = Some(-20000);
+                                            } else {
+                                                current_eval = Some(board.evaluate());
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let all = get_legal_moves(&mut board);
+                                    if all.is_empty() {
+                                        game_over = true;
+                                        game_over_message = "Checkmate!".into();
+                                        current_eval = Some(-20000);
+                                    } else {
+                                        current_eval = Some(board.evaluate());
                                     }
                                 }
                             } else {
@@ -556,30 +572,40 @@ async fn main() {
                         search_best_move(&mut board, search_depth, &mut tt, &game_history);
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
-                    match board.judge_repetition(&game_history, game_history.len()) {
-                        RepetitionResult::Win => {
-                            game_over = true;
-                            game_over_message = "Engine Violation: You Win!".into();
-                            current_eval = Some(20000);
-                        }
-                        RepetitionResult::Loss => {
-                            game_over = true;
-                            game_over_message = "Rule Violation: Engine Wins!".into();
-                            current_eval = Some(-20000);
-                        }
-                        RepetitionResult::Draw => {
-                            game_over = true;
-                            game_over_message = "Draw by Repetition!".into();
-                            current_eval = Some(0);
-                        }
-                        RepetitionResult::Undecided => {
-                            if get_legal_moves(&mut board).is_empty() {
+                    if game_history.len() >= 4 {
+                        match board.judge_repetition(&game_history, game_history.len(), 2) {
+                            RepetitionResult::Win => {
                                 game_over = true;
-                                game_over_message = "Checkmate!".into();
+                                game_over_message = "Engine Violation: You Win!".into();
                                 current_eval = Some(20000);
-                            } else {
-                                current_eval = Some(board.evaluate());
                             }
+                            RepetitionResult::Loss => {
+                                game_over = true;
+                                game_over_message = "Rule Violation: Engine Wins!".into();
+                                current_eval = Some(-20000);
+                            }
+                            RepetitionResult::Draw => {
+                                game_over = true;
+                                game_over_message = "Draw by Repetition!".into();
+                                current_eval = Some(0);
+                            }
+                            RepetitionResult::Undecided => {
+                                if get_legal_moves(&mut board).is_empty() {
+                                    game_over = true;
+                                    game_over_message = "Checkmate!".into();
+                                    current_eval = Some(-20000);
+                                } else {
+                                    current_eval = Some(board.evaluate());
+                                }
+                            }
+                        }
+                    } else {
+                        if get_legal_moves(&mut board).is_empty() {
+                            game_over = true;
+                            game_over_message = "Checkmate!".into();
+                            current_eval = Some(-20000);
+                        } else {
+                            current_eval = Some(board.evaluate());
                         }
                     }
                 }

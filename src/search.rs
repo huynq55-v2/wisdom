@@ -171,7 +171,7 @@ fn negamax(
         return 0;
     }
 
-    match board.judge_repetition(history, history.len()) {
+    match board.judge_repetition(history, history.len(), 1) {
         RepetitionResult::Win => return MATE_VALUE - ply as i32,
         RepetitionResult::Loss => return -MATE_VALUE + ply as i32,
         RepetitionResult::Draw => return 0,

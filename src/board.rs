@@ -40,13 +40,13 @@ impl Color {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PieceType {
-    King,    // Tướng
-    Advisor, // Sĩ
+    King,     // Tướng
+    Advisor,  // Sĩ
     Elephant, // Tượng
-    Horse,   // Mã
-    Rook,    // Xe
-    Cannon,  // Pháo
-    Pawn,    // Tốt
+    Horse,    // Mã
+    Rook,     // Xe
+    Cannon,   // Pháo
+    Pawn,     // Tốt
 }
 
 impl PieceType {
@@ -195,13 +195,17 @@ impl Board {
             // No pieces found between them
             return true;
         }
-        
+
         false
     }
 
     /// Checks if a specific color's King is under attack by opponent pieces.
     pub fn is_in_check(&self, color: Color) -> bool {
-        let king_sq = if color == Color::Red { self.red_king_sq } else { self.black_king_sq };
+        let king_sq = if color == Color::Red {
+            self.red_king_sq
+        } else {
+            self.black_king_sq
+        };
         let opp_color = color.opposite();
 
         // 1. Check Rook and Cannon attacks
@@ -209,12 +213,12 @@ impl Board {
         for &dir in &dirs {
             let mut current_opt = king_sq.checked_add_signed(dir);
             let mut pieces_between = 0;
-            
+
             while let Some(current) = current_opt {
                 if !Self::is_valid_square(current) {
                     break;
                 }
-                
+
                 if let Some(piece) = self.piece_at(current) {
                     if piece.color == opp_color {
                         if pieces_between == 0 && piece.piece_type == PieceType::Rook {
@@ -232,12 +236,12 @@ impl Board {
                 current_opt = current.checked_add_signed(dir);
             }
         }
-        
+
         // 2. Check Horse attacks.
         // Reverse jump: King to Horse offset. Horse needs unblocked leg to reach King.
-        let horse_jumps : [isize; 8] = [-33, -31, -14, 18, 33, 31, 14, -18];
-        let horse_legs  : [isize; 8] = [-16, -16, 1, 1, 16, 16, -1, -1];
-        
+        let horse_jumps: [isize; 8] = [-33, -31, -14, 18, 33, 31, 14, -18];
+        let horse_legs: [isize; 8] = [-16, -16, 1, 1, 16, 16, -1, -1];
+
         for i in 0..8 {
             let opp_horse_offset = -horse_jumps[i];
             if let Some(opp_horse_sq) = king_sq.checked_add_signed(opp_horse_offset) {
@@ -257,7 +261,7 @@ impl Board {
 
         // 3. Check Pawn attacks
         // If color == Red, Opponent is Black. Black pawns move down (+16), so check King - 16.
-        let opp_forward : isize = if color == Color::Red { -16 } else { 16 };
+        let opp_forward: isize = if color == Color::Red { -16 } else { 16 };
         for &pawn_offset in &[opp_forward, -1, 1] {
             if let Some(pawn_sq) = king_sq.checked_add_signed(pawn_offset) {
                 if Self::is_valid_square(pawn_sq) {
@@ -269,7 +273,7 @@ impl Board {
                 }
             }
         }
-        
+
         false
     }
 
@@ -277,11 +281,11 @@ impl Board {
     /// This is used heavily in Mate Search.
     pub fn is_checking_move(&mut self, m: Move) -> bool {
         let side = self.side_to_move;
-        
+
         let undo = self.make_move(m);
         let checks = self.is_in_check(side.opposite());
         self.unmake_move(m, undo);
-        
+
         checks
     }
 
@@ -291,14 +295,14 @@ impl Board {
         if let Some(mut piece) = original_piece {
             piece.color = defending_color.opposite(); // Pretend it's an enemy
             self.set_piece(sq, Some(piece));
-            
+
             let original_side = self.side_to_move;
             self.side_to_move = defending_color;
             let captures = self.generate_captures();
             self.side_to_move = original_side;
-            
+
             self.set_piece(sq, original_piece); // Restore
-            
+
             for m in captures {
                 if m.to_sq() == sq {
                     is_def = true;
@@ -314,28 +318,29 @@ impl Board {
     pub fn get_unprotected_threats(&mut self, attacker_color: Color) -> u128 {
         let mut threats: u128 = 0;
         let victim_color = attacker_color.opposite();
-        
+
         let original_side = self.side_to_move;
         self.side_to_move = attacker_color;
         let attacks = self.generate_captures();
         self.side_to_move = original_side;
-        
+
         for m in attacks {
             let victim_sq = m.to_sq();
             let attacker_sq = m.from_sq();
-            
+
             if let Some(victim_piece) = self.piece_at(victim_sq) {
                 if let Some(attacker_piece) = self.piece_at(attacker_sq) {
                     if victim_piece.piece_type == PieceType::King {
                         continue;
                     }
-                    
-                    let is_unprotected = if attacker_piece.piece_type.value() < victim_piece.piece_type.value() {
-                        true
-                    } else {
-                        !self.is_defended(victim_sq, victim_color)
-                    };
-                    
+
+                    let is_unprotected =
+                        if attacker_piece.piece_type.value() < victim_piece.piece_type.value() {
+                            true
+                        } else {
+                            !self.is_defended(victim_sq, victim_color)
+                        };
+
                     if is_unprotected {
                         let dense_sq = Self::square_to_dense(victim_sq);
                         threats |= 1_u128 << dense_sq;
@@ -343,7 +348,7 @@ impl Board {
                 }
             }
         }
-        
+
         threats
     }
 
@@ -358,7 +363,9 @@ impl Board {
         let mut i = history.len() as isize - 3;
         while i >= 0 {
             let entry = &history[i as usize];
-            if !entry.is_reversible { break; }
+            if !entry.is_reversible {
+                break;
+            }
             if entry.hash == current_hash {
                 // Found cycle - check if all OUR moves are idle (no check, no chase)
                 for idx in (i as usize)..history.len() {
@@ -375,7 +382,12 @@ impl Board {
         false
     }
 
-    pub fn judge_repetition(&self, history: &[HistoryEntry], current_ply: usize) -> RepetitionResult {
+    pub fn judge_repetition(
+        &self,
+        history: &[HistoryEntry],
+        current_ply: usize,
+        rep_threshold: usize,
+    ) -> RepetitionResult {
         if history.len() < 4 {
             return RepetitionResult::Undecided;
         }
@@ -384,7 +396,7 @@ impl Board {
         let mut rep_count = 0;
         let mut loop_start_index = 0;
 
-        let mut i = history.len() as isize - 3; 
+        let mut i = history.len() as isize - 3;
         while i >= 0 {
             let entry = &history[i as usize];
             if !entry.is_reversible {
@@ -393,9 +405,15 @@ impl Board {
             if entry.hash == current_hash {
                 rep_count += 1;
                 loop_start_index = i as usize;
-                break;
+                if rep_count >= rep_threshold {
+                    break;
+                }
             }
             i -= 2;
+        }
+
+        if rep_count < rep_threshold {
+            return RepetitionResult::Undecided;
         }
 
         if rep_count == 0 {
@@ -410,11 +428,19 @@ impl Board {
         for idx in loop_start_index..history.len() {
             let entry = &history[idx];
             if idx % 2 == current_ply % 2 {
-                if !entry.is_check { our_all_checks = false; }
-                if entry.chased_set == 0 { our_all_chases = false; }
+                if !entry.is_check {
+                    our_all_checks = false;
+                }
+                if entry.chased_set == 0 {
+                    our_all_chases = false;
+                }
             } else {
-                if !entry.is_check { opp_all_checks = false; }
-                if entry.chased_set == 0 { opp_all_chases = false; }
+                if !entry.is_check {
+                    opp_all_checks = false;
+                }
+                if entry.chased_set == 0 {
+                    opp_all_chases = false;
+                }
             }
         }
 
@@ -469,7 +495,7 @@ impl Board {
                 }
             }
         }
-        
+
         score
     }
 
@@ -489,7 +515,7 @@ impl Board {
         // Remove moving piece from 'from' and add it to 'to' in the hash
         self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][from];
         self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][to];
-        
+
         // Remove captured piece from the hash
         if let Some(cap) = captured {
             self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[cap.zobrist_index()][to];
@@ -510,7 +536,7 @@ impl Board {
 
         self.side_to_move = self.side_to_move.opposite();
         self.zobrist_key ^= crate::zobrist::ZOBRIST.side;
-        
+
         undo
     }
 
@@ -521,7 +547,7 @@ impl Board {
 
         // Restore piece to original square
         self.set_piece(from, Some(piece));
-        
+
         // Restore captured piece (if any)
         self.set_piece(to, undo.captured_piece);
 
@@ -542,17 +568,29 @@ impl Board {
         self.red_king_sq = Self::coord_to_square(9, 4);
         self.black_king_sq = Self::coord_to_square(0, 4);
 
-        use PieceType::*;
         use Color::*;
+        use PieceType::*;
 
         // Setup Black (Top, Rows 0-3)
         self.set_piece(Self::coord_to_square(0, 0), Some(Piece::new(Rook, Black)));
         self.set_piece(Self::coord_to_square(0, 1), Some(Piece::new(Horse, Black)));
-        self.set_piece(Self::coord_to_square(0, 2), Some(Piece::new(Elephant, Black)));
-        self.set_piece(Self::coord_to_square(0, 3), Some(Piece::new(Advisor, Black)));
+        self.set_piece(
+            Self::coord_to_square(0, 2),
+            Some(Piece::new(Elephant, Black)),
+        );
+        self.set_piece(
+            Self::coord_to_square(0, 3),
+            Some(Piece::new(Advisor, Black)),
+        );
         self.set_piece(Self::coord_to_square(0, 4), Some(Piece::new(King, Black)));
-        self.set_piece(Self::coord_to_square(0, 5), Some(Piece::new(Advisor, Black)));
-        self.set_piece(Self::coord_to_square(0, 6), Some(Piece::new(Elephant, Black)));
+        self.set_piece(
+            Self::coord_to_square(0, 5),
+            Some(Piece::new(Advisor, Black)),
+        );
+        self.set_piece(
+            Self::coord_to_square(0, 6),
+            Some(Piece::new(Elephant, Black)),
+        );
         self.set_piece(Self::coord_to_square(0, 7), Some(Piece::new(Horse, Black)));
         self.set_piece(Self::coord_to_square(0, 8), Some(Piece::new(Rook, Black)));
 
@@ -584,7 +622,7 @@ impl Board {
         self.set_piece(Self::coord_to_square(6, 4), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 6), Some(Piece::new(Pawn, Red)));
         self.set_piece(Self::coord_to_square(6, 8), Some(Piece::new(Pawn, Red)));
-        
+
         self.compute_zobrist_key();
     }
 }
@@ -596,29 +634,38 @@ mod tests {
     #[test]
     fn test_kings_facing() {
         let mut board = Board::new();
-        
+
         let red_king_sq = Board::coord_to_square(9, 4);
         let black_king_sq = Board::coord_to_square(0, 4);
-        
+
         board.red_king_sq = red_king_sq;
         board.black_king_sq = black_king_sq;
 
         board.set_piece(red_king_sq, Some(Piece::new(PieceType::King, Color::Red)));
-        board.set_piece(black_king_sq, Some(Piece::new(PieceType::King, Color::Black)));
-        
+        board.set_piece(
+            black_king_sq,
+            Some(Piece::new(PieceType::King, Color::Black)),
+        );
+
         // Kings on the same file with no pieces in between -> facing
         assert!(board.kings_facing());
-        
+
         // Block the file with a piece
-        board.set_piece(Board::coord_to_square(5, 4), Some(Piece::new(PieceType::Pawn, Color::Red)));
+        board.set_piece(
+            Board::coord_to_square(5, 4),
+            Some(Piece::new(PieceType::Pawn, Color::Red)),
+        );
         assert!(!board.kings_facing());
-        
+
         // Move one king to a different file
         board.set_piece(black_king_sq, None);
         let new_black_king_sq = Board::coord_to_square(0, 3);
         board.black_king_sq = new_black_king_sq;
-        board.set_piece(new_black_king_sq, Some(Piece::new(PieceType::King, Color::Black)));
-        
+        board.set_piece(
+            new_black_king_sq,
+            Some(Piece::new(PieceType::King, Color::Black)),
+        );
+
         // Even without blockers, they are not on the same file -> not facing
         board.set_piece(Board::coord_to_square(5, 4), None);
         assert!(!board.kings_facing());

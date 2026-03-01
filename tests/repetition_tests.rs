@@ -186,7 +186,7 @@ fn run_repetition_scenario(fen: &str, moves: &[&str]) -> RepetitionResult {
         });
     }
 
-    board.judge_repetition(&history, history.len())
+    board.judge_repetition(&history, history.len(), 1)
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn test_diagram_4_mutual_perpetual_check() {
 }
 
 #[test]
-fn test_diagram_5_perpetual_check_with_multiple_pieces() {
+fn test_diagram_5() {
     let fen = "5c3/8R/4k2P1/3P5/5P3/6P2/5pH2/5A3/4CK3/6rh1 w - - 0 1";
 
     let moves = [
@@ -246,4 +246,42 @@ fn test_diagram_5_perpetual_check_with_multiple_pieces() {
     ];
 
     assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Win);
+}
+
+#[test]
+fn test_diagram_6() {
+    let fen = "3ak1e2/4a4/4e4/r3C2R1/p8/9/P8/4p4/4p4/5K3 w - - 0 1";
+
+    let moves = ["R2=3", "E7+9", "R3=2", "E9-7", "R2=3"];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
+
+#[test]
+fn test_diagram_7() {
+    let fen = "2e2k3/9/4e2P1/3H5/1R7p/6P2/5p2r/8h/4p4/5K3 w - - 0 1";
+
+    let moves = ["H6+7", "K6+1", "H7-6", "K6-1", "H6+7", "K6+1", "H7-6"];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
+
+#[test]
+fn test_diagram_8() {
+    let fen = "3aka3/4h4/4e4/4C4/p3p3p/9/2c7/2C7/4K4/9 w - - 0 1";
+
+    let moves = [
+        "C7=3", "C3=7", "C3=7", "C7=3", "C7=3", "C3=7", "C3=7", "C7=3", "C7=3",
+    ];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
+
+#[test]
+fn test_diagram_9() {
+    let fen = "2eHka3/1H2aPP2/h3e4/p8/5c3/2C6/9/4E4/4A4/r1EK1A1h1 w - - 0 1";
+
+    let moves = ["C7=5", "C6=5", "C5=2", "C5=8", "C2=5", "C8=5", "C5=2"];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
 }
