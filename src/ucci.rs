@@ -1,7 +1,7 @@
-use std::io::{self, BufRead};
 use crate::board::{Board, Color, Piece, PieceType};
 use crate::r#move::Move;
 use crate::search::search_best_move;
+use std::io::{self, BufRead};
 
 pub fn move_to_ucci_string(m: Move) -> String {
     let (from_row, from_col) = Board::square_to_coord(m.from_sq());
@@ -10,7 +10,7 @@ pub fn move_to_ucci_string(m: Move) -> String {
     // UCCI files (columns) from left to right: a to i
     let from_file = (b'a' + from_col as u8) as char;
     let to_file = (b'a' + to_col as u8) as char;
-    
+
     // UCCI ranks from bottom to top: 0 to 9.
     // In our board, Red is bottom (rows 6-9 in array), Black is top (rows 0-3).
     // So row 9 -> rank 0, row 8 -> rank 1... row 0 -> rank 9.
@@ -40,7 +40,7 @@ pub fn parse_ucci_move(board: &Board, ucci: &str) -> Option<Move> {
 
     let from_col = (from_file - b'a') as usize;
     let from_row = (b'9' - from_rank) as usize;
-    
+
     let to_col = (to_file - b'a') as usize;
     let to_row = (b'9' - to_rank) as usize;
 
@@ -54,9 +54,11 @@ pub fn parse_ucci_move(board: &Board, ucci: &str) -> Option<Move> {
 
 pub fn parse_fen(board: &mut Board, fen: &str) {
     *board = Board::new(); // reset
-    
+
     let parts: Vec<&str> = fen.split_whitespace().collect();
-    if parts.is_empty() { return; }
+    if parts.is_empty() {
+        return;
+    }
 
     let position = parts[0];
     let mut row = 0;
@@ -69,7 +71,11 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
         } else if c.is_digit(10) {
             col += c.to_digit(10).unwrap() as usize;
         } else {
-            let color = if c.is_uppercase() { Color::Red } else { Color::Black };
+            let color = if c.is_uppercase() {
+                Color::Red
+            } else {
+                Color::Black
+            };
             let piece_type = match c.to_ascii_lowercase() {
                 'k' => PieceType::King,
                 'a' => PieceType::Advisor,
@@ -80,10 +86,10 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
                 'p' => PieceType::Pawn,
                 _ => continue,
             };
-            
+
             let sq = Board::coord_to_square(row, col);
             board.set_piece(sq, Some(Piece::new(piece_type, color)));
-            
+
             if piece_type == PieceType::King {
                 if color == Color::Red {
                     board.red_king_sq = sq;
@@ -96,7 +102,11 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
     }
 
     if parts.len() > 1 {
-        board.side_to_move = if parts[1] == "b" || parts[1] == "B" { Color::Black } else { Color::Red };
+        board.side_to_move = if parts[1] == "b" || parts[1] == "B" {
+            Color::Black
+        } else {
+            Color::Red
+        };
     }
     board.compute_zobrist_key();
 }
@@ -111,7 +121,9 @@ pub fn ucci_loop() {
     for line in stdin.lock().lines() {
         let line = line.unwrap_or_default();
         let tokens: Vec<&str> = line.trim().split_whitespace().collect();
-        if tokens.is_empty() { continue; }
+        if tokens.is_empty() {
+            continue;
+        }
 
         let cmd = tokens[0];
 
@@ -131,7 +143,10 @@ pub fn ucci_loop() {
                         board.set_initial_position();
                         moves_idx = 2;
                     } else if tokens[1] == "fen" && tokens.len() >= 8 {
-                        let fen = format!("{} {} {} {} {} {}", tokens[2], tokens[3], tokens[4], tokens[5], tokens[6], tokens[7]);
+                        let fen = format!(
+                            "{} {} {} {} {} {}",
+                            tokens[2], tokens[3], tokens[4], tokens[5], tokens[6], tokens[7]
+                        );
                         parse_fen(&mut board, &fen);
                         moves_idx = 8;
                     }
@@ -147,14 +162,14 @@ pub fn ucci_loop() {
                 }
             }
             "go" => {
-        let mut depth = 4; // default
-        if tokens.len() > 2 && tokens[1] == "depth" {
-            depth = tokens[2].parse().unwrap_or(4);
-        }
+                let mut depth = 4; // default
+                if tokens.len() > 2 && tokens[1] == "depth" {
+                    depth = tokens[2].parse().unwrap_or(4);
+                }
 
-        let best_move = search_best_move(&mut board, depth, &mut tt, &[]);
-        let move_str = move_to_ucci_string(best_move);
-        println!("bestmove {}", move_str);
+                let best_move = search_best_move(&mut board, depth, &tt, &[], None);
+                let move_str = move_to_ucci_string(best_move);
+                println!("bestmove {}", move_str);
             }
             "eval" => {
                 println!("info eval {}", board.evaluate());

@@ -7,11 +7,11 @@ use crate::r#move::Move;
 const KING_ADVISOR_OFFSETS: [isize; 4] = [16, -16, 1, -1];
 const ADVISOR_DIAG_OFFSETS: [isize; 4] = [15, 17, -15, -17]; // diagonals
 
-const ELEPHANT_OFFSETS: [isize; 4] = [-34, -30, 34, 30];    // 15*2, 17*2, etc. (Wait, 15 is up-left. Up-left twice is 30. Up-right twice is 34)
-const ELEPHANT_EYES: [isize; 4] = [-17, -15, 17, 15];       // The blocking points
+const ELEPHANT_OFFSETS: [isize; 4] = [-34, -30, 34, 30]; // 15*2, 17*2, etc. (Wait, 15 is up-left. Up-left twice is 30. Up-right twice is 34)
+const ELEPHANT_EYES: [isize; 4] = [-17, -15, 17, 15]; // The blocking points
 
 const HORSE_JUMPS: [isize; 8] = [-33, -31, -14, 18, 33, 31, 14, -18]; // 16*2-1, 16*2+1, 16-2, 16+2 etc.
-const HORSE_LEGS: [isize; 8]  = [-16, -16, 1, 1, 16, 16, -1, -1];     // The blocking points (orthogonal steps before the jump)
+const HORSE_LEGS: [isize; 8] = [-16, -16, 1, 1, 16, 16, -1, -1]; // The blocking points (orthogonal steps before the jump)
 // Example for HORSE_JUMPS[0] = 31 (Up 2, Left 1). The leg is Up 1 (16).
 // This mapping matches exactly.
 
@@ -41,7 +41,9 @@ impl Board {
                         PieceType::Horse => self.gen_horse_moves(sq, only_captures, moves),
                         PieceType::Rook => self.gen_rook_moves(sq, only_captures, moves),
                         PieceType::Cannon => self.gen_cannon_moves(sq, only_captures, moves),
-                        PieceType::Pawn => self.gen_pawn_moves(sq, piece.color, only_captures, moves),
+                        PieceType::Pawn => {
+                            self.gen_pawn_moves(sq, piece.color, only_captures, moves)
+                        }
                     }
                 }
             }
@@ -49,7 +51,13 @@ impl Board {
     }
 
     // Helper to evaluate if a target square is a valid capture or quiet move based on the flag
-    fn add_move_if_valid(&self, from: usize, to: usize, only_captures: bool, moves: &mut Vec<Move>) {
+    fn add_move_if_valid(
+        &self,
+        from: usize,
+        to: usize,
+        only_captures: bool,
+        moves: &mut Vec<Move>,
+    ) {
         if !Self::is_valid_square(to) {
             return;
         }
@@ -203,7 +211,7 @@ impl Board {
 
     fn gen_pawn_moves(&self, sq: usize, color: Color, only_captures: bool, moves: &mut Vec<Move>) {
         let forward_dir = if color == Color::Red { -16 } else { 16 };
-        
+
         // Forward move
         if let Some(forward_to) = sq.checked_add_signed(forward_dir) {
             if Self::is_valid_square(forward_to) {
@@ -234,14 +242,17 @@ mod tests {
         // Place Red Horse at (5, 4)
         let horse_sq = Board::coord_to_square(5, 4);
         board.set_piece(horse_sq, Some(Piece::new(PieceType::Horse, Color::Red)));
-        
+
         // Block one leg going UP (4, 4)
         // Red Pawn at (4, 4) has crossed the river, so it generates 3 moves (1 forward, 2 side).
-        board.set_piece(Board::coord_to_square(4, 4), Some(Piece::new(PieceType::Pawn, Color::Red)));
+        board.set_piece(
+            Board::coord_to_square(4, 4),
+            Some(Piece::new(PieceType::Pawn, Color::Red)),
+        );
 
         board.side_to_move = Color::Red;
         let quiets = board.generate_quiets();
-        
+
         // Unblocked horse in center has 8 moves. With 1 leg blocked (Up), it loses 2 moves = 6 moves.
         // The Red Pawn at (4,4) generates 3 moves.
         // Total expected moves = 9.
@@ -253,17 +264,20 @@ mod tests {
         let mut board = Board::new();
         let cannon_sq = Board::coord_to_square(5, 4);
         board.set_piece(cannon_sq, Some(Piece::new(PieceType::Cannon, Color::Red)));
-        
+
         // Mount at (3, 4)
-        board.set_piece(Board::coord_to_square(3, 4), Some(Piece::new(PieceType::Pawn, Color::Red)));
-        
+        board.set_piece(
+            Board::coord_to_square(3, 4),
+            Some(Piece::new(PieceType::Pawn, Color::Red)),
+        );
+
         // Target at (1, 4)
         let target_sq = Board::coord_to_square(1, 4);
         board.set_piece(target_sq, Some(Piece::new(PieceType::Horse, Color::Black)));
 
         board.side_to_move = Color::Red;
         let captures = board.generate_captures();
-        
+
         // One valid capture
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].to_sq(), target_sq);

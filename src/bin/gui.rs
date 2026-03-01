@@ -569,7 +569,7 @@ async fn main() {
                     current_eval = Some(-20000);
                 } else {
                     let best_move =
-                        search_best_move(&mut board, search_depth, &mut tt, &game_history);
+                        search_best_move(&mut board, search_depth, &tt, &game_history, None);
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
                     if game_history.len() >= 4 {

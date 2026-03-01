@@ -1,14 +1,34 @@
 use crate::board::{Board, HistoryEntry, RepetitionResult};
+use crate::eval_queue::EvalRequest;
 use crate::r#move::Move;
+use crossbeam_channel::Sender;
 
 pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
+pub fn evaluate_node(board: &Board, eval_tx: Option<&Sender<EvalRequest>>) -> i32 {
+    if let Some(tx_queue) = eval_tx {
+        let tensor = crate::nn::board_to_tensor(board);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx_queue
+            .send(crate::eval_queue::EvalRequest {
+                tensor_data: tensor,
+                response_tx: tx,
+            })
+            .unwrap();
+        let nn_value = rx.recv().unwrap();
+        (nn_value * 10000.0) as i32
+    } else {
+        board.evaluate()
+    }
+}
+
 pub fn search_best_move(
     board: &mut Board,
     depth: u8,
-    tt: &mut crate::tt::TranspositionTable,
+    tt: &crate::tt::TranspositionTable,
     game_history: &[HistoryEntry],
+    eval_tx: Option<&Sender<EvalRequest>>,
 ) -> Move {
     let mut history = game_history.to_vec();
     let mut best_move = None;
@@ -55,7 +75,16 @@ pub fn search_best_move(
             is_reversible: false,
         });
 
-        let score = -negamax(board, next_depth, 1, -beta, -alpha, tt, &mut history);
+        let score = -negamax(
+            board,
+            next_depth,
+            1,
+            -beta,
+            -alpha,
+            tt,
+            &mut history,
+            eval_tx,
+        );
 
         history.pop();
         board.unmake_move(*m, undo);
@@ -117,7 +146,16 @@ pub fn search_best_move(
                 is_reversible,
             });
 
-            let score = -negamax(board, next_depth, 1, -beta, -alpha, tt, &mut history);
+            let score = -negamax(
+                board,
+                next_depth,
+                1,
+                -beta,
+                -alpha,
+                tt,
+                &mut history,
+                eval_tx,
+            );
 
             history.pop();
             board.unmake_move(*m, undo);
@@ -163,8 +201,9 @@ fn negamax(
     ply: u8,
     mut alpha: i32,
     beta: i32,
-    tt: &mut crate::tt::TranspositionTable,
+    tt: &crate::tt::TranspositionTable,
     history: &mut Vec<HistoryEntry>,
+    eval_tx: Option<&Sender<EvalRequest>>,
 ) -> i32 {
     // Algorithm 10: Quick prune if draw beats beta and we are idle
     if board.judge_prune(history, history.len(), beta) {
@@ -181,7 +220,7 @@ fn negamax(
     let orig_alpha = alpha;
 
     if depth == 0 {
-        return quiescence(board, alpha, beta);
+        return quiescence(board, alpha, beta, eval_tx);
     }
 
     let mut tt_move = None;
@@ -232,7 +271,16 @@ fn negamax(
             is_reversible: false,
         });
 
-        let score = -negamax(board, next_depth, ply + 1, -beta, -alpha, tt, history);
+        let score = -negamax(
+            board,
+            next_depth,
+            ply + 1,
+            -beta,
+            -alpha,
+            tt,
+            history,
+            eval_tx,
+        );
 
         history.pop();
         board.unmake_move(*m, undo);
@@ -301,7 +349,16 @@ fn negamax(
             is_reversible,
         });
 
-        let score = -negamax(board, next_depth, ply + 1, -beta, -alpha, tt, history);
+        let score = -negamax(
+            board,
+            next_depth,
+            ply + 1,
+            -beta,
+            -alpha,
+            tt,
+            history,
+            eval_tx,
+        );
 
         history.pop();
         board.unmake_move(*m, undo);
@@ -344,8 +401,13 @@ fn mvv_lva(board: &Board, m: Move) -> i32 {
     victim.piece_type.value() * 100 - attacker.piece_type.value()
 }
 
-fn quiescence(board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
-    let stand_pat = board.evaluate();
+fn quiescence(
+    board: &mut Board,
+    mut alpha: i32,
+    beta: i32,
+    eval_tx: Option<&Sender<EvalRequest>>,
+) -> i32 {
+    let stand_pat = evaluate_node(board, eval_tx);
     if stand_pat >= beta {
         return beta;
     }
@@ -366,7 +428,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
             continue;
         }
 
-        let score = -quiescence(board, -beta, -alpha);
+        let score = -quiescence(board, -beta, -alpha, eval_tx);
         board.unmake_move(*m, undo);
 
         if score >= beta {
@@ -378,4 +440,54 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
     }
 
     alpha
+}
+
+pub fn search_best_move_parallel(
+    board: &Board,
+    depth: u8,
+    tt: &crate::tt::TranspositionTable,
+    game_history: &[HistoryEntry],
+    eval_tx: &crossbeam_channel::Sender<EvalRequest>,
+    num_threads: usize,
+) -> (Move, i32) {
+    let best_move_global = std::sync::Mutex::new(None);
+    let best_score_global = std::sync::Mutex::new(-INFINITY);
+
+    std::thread::scope(|s| {
+        for _ in 0..num_threads {
+            // Lazy SMP: all threads run identical search initially, but lock-less TT
+            // interactions will differentiate their paths slightly.
+            let mut local_board = board.clone();
+            let local_history = game_history.to_vec();
+
+            let bg = &best_move_global;
+            let bs = &best_score_global;
+
+            s.spawn(move || {
+                let m =
+                    search_best_move(&mut local_board, depth, tt, &local_history, Some(eval_tx));
+
+                // Get score from TT for root board
+                let score = if let Some((tt_score, _)) =
+                    tt.probe(local_board.zobrist_key, depth, 0, -INFINITY, INFINITY)
+                {
+                    tt_score
+                } else {
+                    -INFINITY
+                };
+
+                let mut bs_guard = bs.lock().unwrap();
+                if score > *bs_guard {
+                    let mut bg_guard = bg.lock().unwrap();
+                    *bs_guard = score;
+                    *bg_guard = Some(m);
+                }
+            });
+        }
+    });
+
+    (
+        best_move_global.into_inner().unwrap().unwrap(),
+        best_score_global.into_inner().unwrap(),
+    )
 }

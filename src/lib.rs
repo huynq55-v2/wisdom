@@ -1,8 +1,10 @@
 pub mod board;
+pub mod eval_queue;
 pub mod r#move;
 pub mod movegen;
+pub mod nn;
 pub mod perft;
 pub mod search;
+pub mod tt;
 pub mod ucci;
 pub mod zobrist;
-pub mod tt;

@@ -97,6 +97,7 @@ impl Piece {
 // In a 16-width array, a square index `sq` is valid if `(sq & 0x8F) <= 8`.
 // However, since we need 10 rows, a u8 is perfectly fine (max index 16*9+8 = 152).
 // To keep things simple and power-of-2 aligned, we use an array of size 256.
+#[derive(Clone)]
 pub struct Board {
     pub squares: [Option<Piece>; 256],
     pub side_to_move: Color,

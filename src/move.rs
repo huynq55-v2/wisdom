@@ -1,29 +1,29 @@
 /// A single move encoded in a `u16` unsigned integer.
-/// 
+///
 /// Bit Layout (15 bits used):
 /// 0-6   (7 bits):  `from` square (0-152) -> 128 is not enough if index goes up to 0x98 (152), so we need 8 bits!
 /// Wait, let's recount.
 /// Max square index is 152 (0x98). 8 bits can hold up to 255.
-/// 
+///
 /// Corrected Layout (17 bits needed?? No).
 /// Wait, `u16` has 16 bits.
 /// 0-7  (8 bits): `from` square (0-255)
 /// 8-14 (7 bits): `to` square (0-152) -> Wait, `to` square also needs 8 bits!
 /// If both need 8 bits, that's 16 bits. Then we have no room for `is_capture` flag in a `u16`.
-/// 
+///
 /// Let's use `u32` just to be safe and keep it simple without complex bit trickery.
 /// Or, we only store the dense 0-89 index for the positions, which fits in 7 bits!
-/// To convert a 256-array index to a dense 0-89 index: 
+/// To convert a 256-array index to a dense 0-89 index:
 /// dense = (sq / 16) * 9 + (sq % 16).
 /// dense fits in 7 bits (0-127).
-/// 
+///
 /// Let's use the dense 7-bit index to keep `Move` as a `u16`!
 /// Bits 0-6:   dense `from` index (0-89)
 /// Bits 7-13:  dense `to` index (0-89)
 /// Bit  14:    `is_capture` flag (0 or 1)
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Move(u16);
+pub struct Move(pub u16);
 
 impl Move {
     /// Creates a new move from two 0x88 board indices and a capture flag.
