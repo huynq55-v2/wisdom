@@ -43,20 +43,14 @@ impl EvalQueue {
                     Err(_) => break, // Channel closed, exit thread
                 }
 
-                // Try to collect more requests up to batch_size or timeout
-                let deadline = Instant::now() + timeout;
+                // Try to collect more requests up to batch_size, instantly via try_recv
                 while response_channels.len() < batch_size {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-                    match rx.recv_timeout(deadline - now) {
+                    match rx.try_recv() {
                         Ok(req) => {
                             batch_inputs.extend_from_slice(&req.tensor_data);
                             response_channels.push(req.response_tx);
                         }
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                        Err(_) => break, // Queue trống, lập tức mang đi chạy GPU luôn!
                     }
                 }
 

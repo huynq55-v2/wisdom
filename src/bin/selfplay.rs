@@ -346,7 +346,7 @@ fn main() {
 
     let num_iterations = 10;
     let games_per_iteration = 100;
-    let concurrent_games = 32;
+    let concurrent_games = 128; // <-- TĂNG LÊN ĐỂ GPU LUÔN BỊ LÀM ĐẦY BATCH SIZE
 
     for iteration in 1..=num_iterations {
         println!("============================================================");
