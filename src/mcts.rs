@@ -11,13 +11,13 @@ pub const VIRTUAL_LOSS: u32 = 1;
 
 pub struct AtomicMCTSNode {
     pub visits: AtomicU32,      // N - Visit count with Virtual Loss
-    pub total_value: AtomicU64, // W - Scaled by 1_000_000 for atomic integer ops
+    pub total_value: AtomicU64, // W - Điểm số DƯỚI GÓC NHÌN CỦA NODE NÀY
 
-    pub children_index: AtomicU32, // Pointer to children array start
-    pub num_children: AtomicU32,
+    pub children_index: AtomicU32, 
+    pub num_children: AtomicU32, // u32::MAX nghĩa là Đang Lock (Đang Expansion)
 
-    pub move_from_parent: AtomicU32, // Move integer casted to u32
-    pub prior_prob: AtomicU32,       // f32 bits
+    pub move_from_parent: AtomicU32, 
+    pub prior_prob: AtomicU32,       
 }
 
 impl AtomicMCTSNode {
@@ -33,10 +33,8 @@ impl AtomicMCTSNode {
     }
 
     pub fn set_data(&self, move_val: u16, prior_prob: f32) {
-        self.move_from_parent
-            .store(move_val as u32, Ordering::Release);
-        self.prior_prob
-            .store(prior_prob.to_bits(), Ordering::Release);
+        self.move_from_parent.store(move_val as u32, Ordering::Release);
+        self.prior_prob.store(prior_prob.to_bits(), Ordering::Release);
     }
 
     pub fn get_prior_prob(&self) -> f32 {
@@ -115,10 +113,10 @@ impl MCTS {
         root_board: &Board,
         simulations: usize,
         eval_tx: &Sender<EvalRequest>,
-        tt: &TranspositionTable,
+        _tt: &TranspositionTable,
         num_threads: usize,
     ) -> Move {
-        // Init Root Node
+        // Reset cây về trạng thái ban đầu
         self.tree[0].visits.store(0, Ordering::Release);
         self.tree[0].total_value.store(0, Ordering::Release);
         self.tree[0].children_index.store(0, Ordering::Release);
@@ -126,35 +124,30 @@ impl MCTS {
         self.tree[0].set_data(0, 1.0);
         self.next_node_idx.store(1, Ordering::SeqCst);
 
-        // Expand root manually
-        let mut legal_moves = root_board.generate_captures();
-        legal_moves.append(&mut root_board.generate_quiets());
+        // Mở rộng Nút gốc (Root Expansion)
+        let mut pseudo_moves = root_board.generate_captures();
+        pseudo_moves.append(&mut root_board.generate_quiets());
+        let mut legal_moves = Vec::new();
+        let current_side = root_board.side_to_move;
 
-        let root_p;
-        if let Some(data) = tt.probe_mcts(root_board.zobrist_key) {
-            root_p = data.policy.clone();
-        } else {
-            let tensor = crate::nn::board_to_tensor(root_board);
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            eval_tx
-                .send(EvalRequest {
-                    tensor_data: tensor,
-                    response_tx: tx,
-                    need_policy: true,
-                })
-                .unwrap();
-            let (v, opt_p) = rx.recv().unwrap();
-            let p = opt_p.unwrap();
-            tt.record_mcts(root_board.zobrist_key, v, p.clone());
-            root_p = p;
+        // FIX BUG 2: Chỉ cho phép các nước đi hợp lệ (không lộ Tướng)
+        for &m in &pseudo_moves {
+            let mut test_board = root_board.clone();
+            test_board.make_move(m);
+            if !test_board.kings_facing() && !test_board.is_in_check(current_side) {
+                legal_moves.push(m);
+            }
         }
 
-        let policy = root_p;
+        // Đánh giá Root bằng Mạng Neural
+        let tensor = crate::nn::board_to_tensor(root_board);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        eval_tx.send(EvalRequest { tensor_data: tensor, response_tx: tx, need_policy: true }).unwrap();
+        let (_v, opt_p) = rx.recv().unwrap();
+        let policy = opt_p.unwrap();
 
         if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
-            self.tree[0]
-                .children_index
-                .store(start_idx, Ordering::Release);
+            self.tree[0].children_index.store(start_idx, Ordering::Release);
             for (i, m) in legal_moves.iter().enumerate() {
                 let idx = start_idx as usize + i;
                 let nn_idx = move_to_index(*m);
@@ -165,25 +158,23 @@ impl MCTS {
                 self.tree[idx].num_children.store(0, Ordering::Release);
                 self.tree[idx].set_data(m.0, p);
             }
-            self.tree[0]
-                .num_children
-                .store(legal_moves.len() as u32, Ordering::Release);
+            self.tree[0].num_children.store(legal_moves.len() as u32, Ordering::Release);
         }
 
-        // Multithreaded Search Loop
+        // Khởi chạy Đa luồng (Tree Parallelism)
         std::thread::scope(|s| {
             for _ in 0..num_threads {
                 s.spawn(|| {
                     let mut local_board = root_board.clone();
                     for _ in 0..(simulations / num_threads) {
-                        self.playout(&mut local_board, eval_tx, tt);
+                        self.playout(&mut local_board, eval_tx);
                         local_board = root_board.clone();
                     }
                 });
             }
         });
 
-        // Pick best move based on visits
+        // Chọn nước đi có số lần duyệt (Visits) cao nhất
         let mut best_move = Move(0);
         let mut max_visits = 0;
         let start_idx = self.tree[0].children_index.load(Ordering::Acquire);
@@ -202,21 +193,24 @@ impl MCTS {
         best_move
     }
 
-    fn playout(&self, board: &mut Board, eval_tx: &Sender<EvalRequest>, tt: &TranspositionTable) {
+    fn playout(&self, board: &mut Board, eval_tx: &Sender<EvalRequest>) {
         let mut path = Vec::with_capacity(64);
         let mut current_idx = 0;
         path.push(current_idx);
 
-        // 1. SELECT
+        // 1. SELECT (Đi từ Root xuống Leaf)
         loop {
             let node = &self.tree[current_idx];
+
+            // Phạt Ảo (Virtual Loss)
             let node_visits = node.visits.fetch_add(VIRTUAL_LOSS, Ordering::AcqRel);
-            // Apply Virtual Loss to Value as well
             node.add_value(-1.0);
 
             let num_children = node.num_children.load(Ordering::Acquire);
-            if num_children == 0 {
-                break; // Reached leaf
+
+            // Nếu gặp Leaf Node hoặc Node đang bị khóa -> Dừng Select
+            if num_children == 0 || num_children == u32::MAX {
+                break;
             }
 
             let start_idx = node.children_index.load(Ordering::Acquire);
@@ -231,10 +225,12 @@ impl MCTS {
                 let child_idx = start_idx as usize + i as usize;
                 let child = &self.tree[child_idx];
                 let cv = child.visits.load(Ordering::Acquire) as f32;
+
                 let mut q = 0.0;
                 if cv > 0.0 {
                     let total_val = child.get_value();
-                    q = total_val / cv; // Mean action value
+                    // FIX BUG 1: Đảo chiều Value (Q của đối thủ càng cao, mình càng né)
+                    q = -total_val / cv;
                 }
 
                 let prior = child.get_prior_prob();
@@ -255,72 +251,77 @@ impl MCTS {
 
         // 2. EXPAND & EVALUATE
         let leaf_node = &self.tree[current_idx];
-
         let mut value = 0.0;
-        let mut is_game_over = false;
 
-        let moving_side = board.side_to_move;
-        if board.kings_facing() || board.is_in_check(moving_side) {
-            value = -1.0;
-            is_game_over = true;
+        // FIX BUG 2: Lọc các nước cờ hợp lệ thật sự
+        let mut pseudo_moves = board.generate_captures();
+        pseudo_moves.append(&mut board.generate_quiets());
+        let mut legal_moves = Vec::with_capacity(pseudo_moves.len());
+        let current_side = board.side_to_move;
+
+        for &m in &pseudo_moves {
+            let undo = board.make_move(m);
+            if !board.kings_facing() && !board.is_in_check(current_side) {
+                legal_moves.push(m);
+            }
+            board.unmake_move(m, undo);
         }
 
-        if !is_game_over {
-            let mut legal_moves = board.generate_captures();
-            legal_moves.append(&mut board.generate_quiets());
+        if legal_moves.is_empty() {
+            // Hết cờ (Bị chiếu bí hoặc hết nước đi) -> Value = -1 (Thua)
+            value = -1.0;
+        } else {
+            // FIX BUG 3: Dùng Spin-lock (Cờ hiệu u32::MAX) để ngăn đụng độ bộ nhớ đa luồng
+            if leaf_node.num_children.compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                // Ta đã khóa được Node! Gọi GPU đánh giá
+                let tensor = crate::nn::board_to_tensor(board);
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                eval_tx.send(EvalRequest { tensor_data: tensor, response_tx: tx, need_policy: true }).unwrap();
 
-            if legal_moves.is_empty() {
-                value = -1.0;
-            } else {
-                let p: Vec<f32>;
-                if let Some(data) = tt.probe_mcts(board.zobrist_key) {
-                    value = data.value;
-                    p = data.policy.clone();
-                } else {
-                    let tensor = crate::nn::board_to_tensor(board);
-                    let (tx, rx) = crossbeam_channel::bounded(1);
-                    eval_tx
-                        .send(EvalRequest {
-                            tensor_data: tensor,
-                            response_tx: tx,
-                            need_policy: true,
-                        })
-                        .unwrap();
-                    let (v, opt_p) = rx.recv().unwrap();
-                    value = v;
-                    p = opt_p.unwrap();
-                    tt.record_mcts(board.zobrist_key, value, p.clone());
-                }
+                let (v, opt_p) = rx.recv().unwrap();
+                value = v;
+                let p = opt_p.unwrap();
 
+                // Cấp phát con
                 if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
                     leaf_node.children_index.store(start_idx, Ordering::Release);
                     for (i, m) in legal_moves.iter().enumerate() {
                         let idx = start_idx as usize + i;
                         let nn_idx = move_to_index(*m);
-                        let prior = p[nn_idx];
 
-                        self.tree[idx].set_data(m.0, prior);
+                        self.tree[idx].set_data(m.0, p[nn_idx]);
                         self.tree[idx].visits.store(0, Ordering::Release);
                         self.tree[idx].total_value.store(0, Ordering::Release);
                         self.tree[idx].children_index.store(0, Ordering::Release);
                         self.tree[idx].num_children.store(0, Ordering::Release);
                     }
-                    leaf_node
-                        .num_children
-                        .store(legal_moves.len() as u32, Ordering::Release);
+                    // Mở khóa: Ghi số lượng con thật sự vào
+                    leaf_node.num_children.store(legal_moves.len() as u32, Ordering::Release);
                 }
+            } else {
+                // Có một luồng khác đang mở rộng Node này. Ta Spin-wait.
+                while leaf_node.num_children.load(Ordering::Acquire) == u32::MAX {
+                    std::hint::spin_loop();
+                }
+                // Lấy điểm hiện tại của Node để Backprop
+                let cv = std::cmp::max(1, leaf_node.visits.load(Ordering::Acquire)) as f32;
+                value = -leaf_node.get_value() / cv;
             }
         }
 
         // 3. BACKPROPAGATION
-        let mut current_val = value;
+        // FIX BUG 1 (tiếp): `value` là điểm của Leaf Node.
+        // Điểm của nước đi dẫn tới Leaf (tức là Cha của Leaf) sẽ là `-value`
+        let mut current_val = -value;
+
         for &idx in path.iter().rev() {
             let node = &self.tree[idx];
 
-            // Remove Virtual Loss (+1) and Add Real Value
+            // Rút điểm phạt ảo (1.0) ra, và cộng điểm thật sự (current_val) vào
             node.add_value(1.0 + current_val);
 
-            current_val = -current_val; // Alternate turn games
+            // Nghịch đảo dấu cho Node cha tiếp theo (Đỏ -> Đen -> Đỏ)
+            current_val = -current_val;
         }
     }
 }
