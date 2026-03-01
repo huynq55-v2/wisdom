@@ -1,12 +1,18 @@
+use burn::backend::{NdArray, ndarray::NdArrayDevice};
 use macroquad::prelude::*;
 use wisdom::board::{Board, Color as PieceColor, HistoryEntry, PieceType, RepetitionResult};
+use wisdom::eval_queue::EvalQueue;
+use wisdom::mcts::MCTS;
+use wisdom::nn::XiangqiNetConfig;
 use wisdom::r#move::Move;
-use wisdom::search::alphabeta_search_best_move;
+use wisdom::tt::TranspositionTable;
 
 const SQUARE_SIZE: f32 = 60.0;
 const OFFSET_X: f32 = 50.0;
 const OFFSET_Y: f32 = 50.0;
 const RADIUS: f32 = 25.0;
+
+const MODEL_PATH: &str = "xiangqi_net_weights";
 
 #[derive(PartialEq)]
 enum GameMode {
@@ -42,7 +48,6 @@ fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry
         });
     let moving_side = board.side_to_move;
 
-    // Compute pre-move threats BEFORE making the move
     let pre_threats = if is_reversible {
         board.get_unprotected_threats(moving_side)
     } else {
@@ -53,7 +58,6 @@ fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry
 
     let gives_check = board.is_in_check(board.side_to_move);
 
-    // Only NEW threats count as "chase" per WXF rules
     let chased_set = if is_reversible && !gives_check {
         let post_threats = board.get_unprotected_threats(moving_side);
         post_threats & !pre_threats
@@ -70,9 +74,8 @@ fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry
 }
 
 fn draw_board() {
-    clear_background(Color::new(0.9, 0.8, 0.6, 1.0)); // Wood color
+    clear_background(Color::new(0.9, 0.8, 0.6, 1.0));
 
-    // Draw lines
     for col in 0..9 {
         let x = OFFSET_X + col as f32 * SQUARE_SIZE;
         draw_line(x, OFFSET_Y, x, OFFSET_Y + 4.0 * SQUARE_SIZE, 2.0, BLACK);
@@ -85,7 +88,6 @@ fn draw_board() {
             BLACK,
         );
     }
-    // Edges across the river
     draw_line(
         OFFSET_X,
         OFFSET_Y + 4.0 * SQUARE_SIZE,
@@ -141,7 +143,6 @@ fn draw_board() {
         2.0,
         BLACK,
     );
-
     draw_line(
         OFFSET_X + 3.0 * SQUARE_SIZE,
         OFFSET_Y + 7.0 * SQUARE_SIZE,
@@ -159,7 +160,6 @@ fn draw_board() {
         BLACK,
     );
 
-    // Draw "River" text (optional, simple decorative text)
     draw_text(
         "楚 河             漢 界",
         OFFSET_X + 1.5 * SQUARE_SIZE,
@@ -198,12 +198,10 @@ fn draw_pieces(
             let x = OFFSET_X + d_col as f32 * SQUARE_SIZE;
             let y = OFFSET_Y + d_row as f32 * SQUARE_SIZE;
 
-            // Highlight selected square
             if Some(sq) == selected_sq {
                 draw_circle(x, y, RADIUS + 5.0, YELLOW);
             }
 
-            // Highlight valid move targets
             if selected_sq.is_some() && legal_moves.iter().any(|m| m.to_sq() == sq) {
                 draw_circle(x, y, 10.0, GREEN);
             }
@@ -267,11 +265,10 @@ fn draw_button(text: &str, x: f32, y: f32, w: f32, h: f32, active: bool, color: 
     false
 }
 
-// Window conf
 fn window_conf() -> Conf {
     Conf {
-        window_title: "Wisdom Engine - Xiangqi".to_owned(),
-        window_width: 900, // Widened for control panel
+        window_title: "Wisdom Engine - Xiangqi (MCTS)".to_owned(),
+        window_width: 900,
         window_height: 700,
         ..Default::default()
     }
@@ -279,10 +276,28 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // --- Initialize NN + MCTS Engine ---
+    type B = NdArray<f32>;
+    let device = NdArrayDevice::Cpu;
+    let config = XiangqiNetConfig::new();
+
+    let model = if std::path::Path::new(&format!("{}.mpk", MODEL_PATH)).exists() {
+        println!("📦 GUI: Phát hiện file model đã huấn luyện!");
+        config.load_model::<B>(MODEL_PATH, &device)
+    } else {
+        println!("⚠️ GUI: Không tìm thấy model. Dùng model ngẫu nhiên.");
+        config.init::<B>(&device)
+    };
+
+    let eval_queue = EvalQueue::new(model, device, 32, 5);
+    let eval_tx = eval_queue.tx.clone();
+    let tt = TranspositionTable::new(64);
+    let mcts = MCTS::new(200_000);
+
+    // --- Game State ---
     let mut board = Board::new();
     board.set_initial_position();
 
-    let mut tt = wisdom::tt::TranspositionTable::new(64);
     let mut game_history: Vec<HistoryEntry> = Vec::new();
 
     let mut selected_sq: Option<usize> = None;
@@ -292,9 +307,9 @@ async fn main() {
 
     // UI State
     let mut game_mode = GameMode::EngineVsPlayer;
-    let mut human_color = PieceColor::Red; // Red is bottom by default
-    let mut search_depth: u8 = 4;
-    let mut current_eval: Option<i32> = Some(board.evaluate());
+    let mut human_color = PieceColor::Red;
+    let mut mcts_simulations: usize = 800;
+    let mut current_eval: Option<String> = Some("Ready".to_string());
 
     loop {
         draw_board();
@@ -304,19 +319,18 @@ async fn main() {
         let panel_x = 620.0;
         let mut py = OFFSET_Y;
 
-        draw_text("Controls", panel_x, py, 30.0, BLACK);
+        draw_text("MCTS Engine", panel_x, py, 30.0, BLACK);
         py += 40.0;
 
         // Reset Button
         if draw_button("Reset Game", panel_x, py, 200.0, 40.0, false, BLUE) {
             board.set_initial_position();
-            tt = wisdom::tt::TranspositionTable::new(64);
             game_history.clear();
             selected_sq = None;
             legal_moves.clear();
             game_over = false;
             game_over_message = "GAME OVER".into();
-            current_eval = Some(board.evaluate());
+            current_eval = Some("Ready".to_string());
         }
         py += 60.0;
 
@@ -339,7 +353,7 @@ async fn main() {
             legal_moves.clear();
             game_over = false;
             game_over_message = "GAME OVER".into();
-            current_eval = Some(board.evaluate());
+            current_eval = Some("Ready".to_string());
         }
         py += 40.0;
         if draw_button(
@@ -358,11 +372,11 @@ async fn main() {
             legal_moves.clear();
             game_over = false;
             game_over_message = "GAME OVER".into();
-            current_eval = Some(board.evaluate());
+            current_eval = Some("Ready".to_string());
         }
         py += 40.0;
 
-        // Side Selection (Only Engine vs Player)
+        // Side Selection (Only for Engine vs Player)
         if game_mode == GameMode::EngineVsPlayer {
             draw_text("Player Side:", panel_x, py, 20.0, BLACK);
             py += 25.0;
@@ -382,7 +396,7 @@ async fn main() {
                 legal_moves.clear();
                 game_over = false;
                 game_over_message = "GAME OVER".into();
-                current_eval = Some(board.evaluate());
+                current_eval = Some("Ready".to_string());
             }
             if draw_button(
                 "Play Black",
@@ -400,14 +414,14 @@ async fn main() {
                 legal_moves.clear();
                 game_over = false;
                 game_over_message = "GAME OVER".into();
-                current_eval = Some(board.evaluate());
+                current_eval = Some("Ready".to_string());
             }
             py += 40.0;
         }
 
-        // Search Depth
+        // MCTS Simulations Control
         draw_text(
-            &format!("Depth: {}", search_depth),
+            &format!("Simulations: {}", mcts_simulations),
             panel_x,
             py,
             20.0,
@@ -415,34 +429,26 @@ async fn main() {
         );
         py += 25.0;
         if draw_button("-", panel_x, py, 40.0, 30.0, false, GRAY) {
-            if search_depth > 1 {
-                search_depth -= 1;
+            if mcts_simulations > 100 {
+                mcts_simulations -= 100;
             }
         }
         if draw_button("+", panel_x + 50.0, py, 40.0, 30.0, false, GRAY) {
-            if search_depth < 10 {
-                search_depth += 1;
+            if mcts_simulations < 5000 {
+                mcts_simulations += 100;
             }
         }
         py += 50.0;
 
-        // Eval Display
-        if game_mode == GameMode::EngineVsEngine
-            || (game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color)
-        {
-            if let Some(eval) = current_eval {
-                draw_text(
-                    &format!("Eval: {}", eval),
-                    panel_x,
-                    py,
-                    30.0,
-                    match eval {
-                        e if e > 500 => DARKGREEN,
-                        e if e < -500 => MAROON,
-                        _ => BLACK,
-                    },
-                );
-            }
+        // Eval Display (MCTS style)
+        if let Some(ref eval_str) = current_eval {
+            draw_text(
+                eval_str,
+                panel_x,
+                py,
+                22.0,
+                DARKGREEN,
+            );
         }
 
         if game_over {
@@ -477,7 +483,6 @@ async fn main() {
                         let sq = Board::coord_to_square(r, c);
 
                         if selected_sq.is_some() {
-                            // Try to execute move
                             if let Some(&m) = legal_moves.iter().find(|m| m.to_sq() == sq) {
                                 apply_move_to_game(&mut board, m, &mut game_history);
                                 selected_sq = None;
@@ -492,27 +497,27 @@ async fn main() {
                                         RepetitionResult::Win => {
                                             game_over = true;
                                             game_over_message = "Rule Violation: You Lose!".into();
-                                            current_eval = Some(-20000);
+                                            current_eval = Some("LOST".to_string());
                                         }
                                         RepetitionResult::Loss => {
                                             game_over = true;
                                             game_over_message =
                                                 "Opponent Violation: You Win!".into();
-                                            current_eval = Some(20000);
+                                            current_eval = Some("WON".to_string());
                                         }
                                         RepetitionResult::Draw => {
                                             game_over = true;
                                             game_over_message = "Draw by Repetition!".into();
-                                            current_eval = Some(0);
+                                            current_eval = Some("DRAW".to_string());
                                         }
                                         RepetitionResult::Undecided => {
                                             let all = get_legal_moves(&mut board);
                                             if all.is_empty() {
                                                 game_over = true;
                                                 game_over_message = "Checkmate!".into();
-                                                current_eval = Some(-20000);
+                                                current_eval = Some("CHECKMATE".to_string());
                                             } else {
-                                                current_eval = Some(board.evaluate());
+                                                current_eval = Some("Your turn".to_string());
                                             }
                                         }
                                     }
@@ -521,13 +526,12 @@ async fn main() {
                                     if all.is_empty() {
                                         game_over = true;
                                         game_over_message = "Checkmate!".into();
-                                        current_eval = Some(-20000);
+                                        current_eval = Some("CHECKMATE".to_string());
                                     } else {
-                                        current_eval = Some(board.evaluate());
+                                        current_eval = Some("Your turn".to_string());
                                     }
                                 }
                             } else {
-                                // Select another piece if valid
                                 if let Some(piece) = board.piece_at(sq) {
                                     if piece.color == human_color {
                                         selected_sq = Some(sq);
@@ -545,7 +549,6 @@ async fn main() {
                                 }
                             }
                         } else {
-                            // Select piece
                             if let Some(piece) = board.piece_at(sq) {
                                 if piece.color == human_color {
                                     selected_sq = Some(sq);
@@ -559,22 +562,56 @@ async fn main() {
                     }
                 }
             } else {
-                // Engine Turn handling
-                next_frame().await; // render human move or previous frame
+                // ========================================
+                // ENGINE TURN: Use MCTS!
+                // ========================================
+                next_frame().await; // Render the board before AI thinks
 
                 let all_moves = get_legal_moves(&mut board);
                 if all_moves.is_empty() {
                     game_over = true;
                     game_over_message = "Checkmate!".into();
-                    current_eval = Some(-20000);
+                    current_eval = Some("CHECKMATE".to_string());
                 } else {
-                    let (best_move, _) = alphabeta_search_best_move(
-                        &mut board,
-                        search_depth,
+                    current_eval = Some(format!("Thinking... ({} sims)", mcts_simulations));
+
+                    let start = std::time::Instant::now();
+                    let best_move = mcts.search_best_move(
+                        &board,
+                        mcts_simulations,
+                        &eval_tx,
                         &tt,
-                        &game_history,
-                        None,
+                        4, // num_threads
                     );
+                    let elapsed = start.elapsed();
+
+                    // Gather MCTS stats for display
+                    let root_start = mcts.tree[0].children_index.load(std::sync::atomic::Ordering::Acquire);
+                    let root_children = mcts.tree[0].num_children.load(std::sync::atomic::Ordering::Acquire);
+                    let root_visits = mcts.tree[0].visits.load(std::sync::atomic::Ordering::Acquire);
+
+                    let mut best_child_visits = 0u32;
+                    let mut best_child_q = 0.0f32;
+                    for i in 0..root_children {
+                        let idx = root_start as usize + i as usize;
+                        let node = &mcts.tree[idx];
+                        let nv = node.visits.load(std::sync::atomic::Ordering::Acquire);
+                        if nv > best_child_visits {
+                            best_child_visits = nv;
+                            if nv > 0 {
+                                best_child_q = -node.get_value() / nv as f32;
+                            }
+                        }
+                    }
+
+                    // Display: Win% relative to the engine's side
+                    let win_pct = ((best_child_q + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
+                    current_eval = Some(format!(
+                        "V:{} N:{} W:{:.0}% {:.1}s",
+                        root_visits, best_child_visits, win_pct,
+                        elapsed.as_secs_f32()
+                    ));
+
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
                     if game_history.len() >= 4 {
@@ -582,25 +619,23 @@ async fn main() {
                             RepetitionResult::Win => {
                                 game_over = true;
                                 game_over_message = "Engine Violation: You Win!".into();
-                                current_eval = Some(20000);
+                                current_eval = Some("WON".to_string());
                             }
                             RepetitionResult::Loss => {
                                 game_over = true;
                                 game_over_message = "Rule Violation: Engine Wins!".into();
-                                current_eval = Some(-20000);
+                                current_eval = Some("LOST".to_string());
                             }
                             RepetitionResult::Draw => {
                                 game_over = true;
                                 game_over_message = "Draw by Repetition!".into();
-                                current_eval = Some(0);
+                                current_eval = Some("DRAW".to_string());
                             }
                             RepetitionResult::Undecided => {
                                 if get_legal_moves(&mut board).is_empty() {
                                     game_over = true;
                                     game_over_message = "Checkmate!".into();
-                                    current_eval = Some(-20000);
-                                } else {
-                                    current_eval = Some(board.evaluate());
+                                    current_eval = Some("CHECKMATE".to_string());
                                 }
                             }
                         }
@@ -608,9 +643,7 @@ async fn main() {
                         if get_legal_moves(&mut board).is_empty() {
                             game_over = true;
                             game_over_message = "Checkmate!".into();
-                            current_eval = Some(-20000);
-                        } else {
-                            current_eval = Some(board.evaluate());
+                            current_eval = Some("CHECKMATE".to_string());
                         }
                     }
                 }

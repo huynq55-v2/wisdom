@@ -143,6 +143,22 @@ impl XiangqiNetConfig {
             relu: Relu::new(),
         }
     }
+
+    /// Load model from a Burn NamedMpk record file.
+    /// Usage: config.load_model::<B>("path/to/model", &device)
+    pub fn load_model<B: Backend>(&self, path: &str, device: &B::Device) -> XiangqiNet<B> {
+        use burn::record::{NamedMpkFileRecorder, FullPrecisionSettings, Recorder};
+
+        println!("🧠 Đang nạp bộ não từ file: {} ...", path);
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let model = self.init::<B>(device);
+        let record = recorder
+            .load(path.into(), device)
+            .expect("❌ Không thể đọc file model! Hãy kiểm tra lại đường dẫn.");
+        let model = model.load_record(record);
+        println!("✅ Nạp model thành công!");
+        model
+    }
 }
 
 impl<B: Backend> XiangqiNet<B> {

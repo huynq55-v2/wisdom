@@ -1,4 +1,4 @@
-use crate::board::Board;
+use crate::board::{Board, HistoryEntry, PieceType, RepetitionResult};
 use crate::eval_queue::EvalRequest;
 use crate::r#move::Move;
 use crate::nn::move_to_index;
@@ -108,6 +108,39 @@ impl MCTS {
         }
     }
 
+    /// Helper: build a HistoryEntry for a move that was just made on `board`.
+    /// `moving_side` is the side BEFORE make_move (the side that moved).
+    /// `pre_threats` is the threat bitset computed BEFORE make_move.
+    fn make_history_entry(board: &mut Board, m: Move, moving_side: crate::board::Color, pre_threats: u128) -> HistoryEntry {
+        let is_capture = m.is_capture();
+        let piece = board.piece_at(m.to_sq()); // After make_move, piece is at to_sq
+        let is_reversible = if let Some(p) = piece {
+            !is_capture && (p.piece_type != PieceType::Pawn || {
+                let (from_row, _) = Board::square_to_coord(m.from_sq());
+                let (to_row, _) = Board::square_to_coord(m.to_sq());
+                from_row == to_row
+            })
+        } else {
+            false
+        };
+
+        let gives_check = board.is_in_check(board.side_to_move);
+
+        let chased_set = if is_reversible && !gives_check {
+            let post_threats = board.get_unprotected_threats(moving_side);
+            post_threats & !pre_threats
+        } else {
+            0
+        };
+
+        HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set,
+            is_reversible,
+        }
+    }
+
     pub fn search_best_move(
         &self,
         root_board: &Board,
@@ -130,7 +163,6 @@ impl MCTS {
         let mut legal_moves = Vec::new();
         let current_side = root_board.side_to_move;
 
-        // FIX BUG 2: Chỉ cho phép các nước đi hợp lệ (không lộ Tướng)
         for &m in &pseudo_moves {
             let mut test_board = root_board.clone();
             test_board.make_move(m);
@@ -198,6 +230,9 @@ impl MCTS {
         let mut current_idx = 0;
         path.push(current_idx);
 
+        // Track history for repetition detection during playout
+        let mut local_history: Vec<HistoryEntry> = Vec::with_capacity(64);
+
         // 1. SELECT (Đi từ Root xuống Leaf)
         loop {
             let node = &self.tree[current_idx];
@@ -229,7 +264,7 @@ impl MCTS {
                 let mut q = 0.0;
                 if cv > 0.0 {
                     let total_val = child.get_value();
-                    // FIX BUG 1: Đảo chiều Value (Q của đối thủ càng cao, mình càng né)
+                    // FIX BUG 1: Đảo chiều Value
                     q = -total_val / cv;
                 }
 
@@ -246,12 +281,91 @@ impl MCTS {
 
             path.push(best_child);
             current_idx = best_child;
-            board.make_move(Move(best_move_int));
+
+            // Track history: compute HistoryEntry for this move
+            let m = Move(best_move_int);
+            let moving_side = board.side_to_move;
+            let is_capture = m.is_capture();
+            let piece_opt = board.piece_at(m.from_sq());
+            let is_reversible_check = if let Some(p) = piece_opt {
+                !is_capture && (p.piece_type != PieceType::Pawn || {
+                    let (from_row, _) = Board::square_to_coord(m.from_sq());
+                    let (to_row, _) = Board::square_to_coord(m.to_sq());
+                    from_row == to_row
+                })
+            } else {
+                false
+            };
+
+            let pre_threats = if is_reversible_check {
+                board.get_unprotected_threats(moving_side)
+            } else {
+                0
+            };
+
+            board.make_move(m);
+
+            let gives_check = board.is_in_check(board.side_to_move);
+            let chased_set = if is_reversible_check && !gives_check {
+                let post_threats = board.get_unprotected_threats(moving_side);
+                post_threats & !pre_threats
+            } else {
+                0
+            };
+
+            local_history.push(HistoryEntry {
+                hash: board.zobrist_key,
+                is_check: gives_check,
+                chased_set,
+                is_reversible: is_reversible_check,
+            });
         }
 
         // 2. EXPAND & EVALUATE
         let leaf_node = &self.tree[current_idx];
-        let mut value = 0.0;
+        let mut value;
+
+        // === REPETITION CHECK ===
+        // Before evaluating with NN, check if current position is a repetition
+        if local_history.len() >= 4 {
+            match board.judge_repetition(&local_history, local_history.len(), 1) {
+                RepetitionResult::Loss => {
+                    // Current side to move is perpetually chasing/checking → LOSE
+                    value = -1.0;
+                    // Skip expansion, go straight to backprop
+                    let mut current_val = -value;
+                    for &idx in path.iter().rev() {
+                        let node = &self.tree[idx];
+                        node.add_value(1.0 + current_val);
+                        current_val = -current_val;
+                    }
+                    return;
+                }
+                RepetitionResult::Win => {
+                    value = 1.0;
+                    let mut current_val = -value;
+                    for &idx in path.iter().rev() {
+                        let node = &self.tree[idx];
+                        node.add_value(1.0 + current_val);
+                        current_val = -current_val;
+                    }
+                    return;
+                }
+                RepetitionResult::Draw => {
+                    value = 0.0;
+                    let mut current_val = -value;
+                    for &idx in path.iter().rev() {
+                        let node = &self.tree[idx];
+                        node.add_value(1.0 + current_val);
+                        current_val = -current_val;
+                    }
+                    return;
+                }
+                RepetitionResult::Undecided => {
+                    // Continue with normal evaluation
+                }
+            }
+        }
 
         // FIX BUG 2: Lọc các nước cờ hợp lệ thật sự
         let mut pseudo_moves = board.generate_captures();
@@ -271,7 +385,7 @@ impl MCTS {
             // Hết cờ (Bị chiếu bí hoặc hết nước đi) -> Value = -1 (Thua)
             value = -1.0;
         } else {
-            // FIX BUG 3: Dùng Spin-lock (Cờ hiệu u32::MAX) để ngăn đụng độ bộ nhớ đa luồng
+            // FIX BUG 3: Dùng Spin-lock để ngăn đụng độ bộ nhớ đa luồng
             if leaf_node.num_children.compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed).is_ok() {
                 // Ta đã khóa được Node! Gọi GPU đánh giá
                 let tensor = crate::nn::board_to_tensor(board);
@@ -295,7 +409,7 @@ impl MCTS {
                         self.tree[idx].children_index.store(0, Ordering::Release);
                         self.tree[idx].num_children.store(0, Ordering::Release);
                     }
-                    // Mở khóa: Ghi số lượng con thật sự vào
+                    // Mở khóa
                     leaf_node.num_children.store(legal_moves.len() as u32, Ordering::Release);
                 }
             } else {
@@ -303,24 +417,17 @@ impl MCTS {
                 while leaf_node.num_children.load(Ordering::Acquire) == u32::MAX {
                     std::hint::spin_loop();
                 }
-                // Lấy điểm hiện tại của Node để Backprop
                 let cv = std::cmp::max(1, leaf_node.visits.load(Ordering::Acquire)) as f32;
                 value = -leaf_node.get_value() / cv;
             }
         }
 
         // 3. BACKPROPAGATION
-        // FIX BUG 1 (tiếp): `value` là điểm của Leaf Node.
-        // Điểm của nước đi dẫn tới Leaf (tức là Cha của Leaf) sẽ là `-value`
         let mut current_val = -value;
 
         for &idx in path.iter().rev() {
             let node = &self.tree[idx];
-
-            // Rút điểm phạt ảo (1.0) ra, và cộng điểm thật sự (current_val) vào
             node.add_value(1.0 + current_val);
-
-            // Nghịch đảo dấu cho Node cha tiếp theo (Đỏ -> Đen -> Đỏ)
             current_val = -current_val;
         }
     }

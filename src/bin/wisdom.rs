@@ -10,14 +10,28 @@ pub enum HardwareMode {
     GpuWgpu,
 }
 
+const MODEL_PATH: &str = "xiangqi_net_weights";
+
 fn start_engine<B: burn::prelude::Backend>(device: B::Device) {
     let config = XiangqiNetConfig::new();
-    let model = config.init::<B>(&device);
+
+    // Tự động phát hiện file model đã train
+    let model = if std::path::Path::new(&format!("{}.mpk", MODEL_PATH)).exists() {
+        println!("📦 Phát hiện file model đã huấn luyện!");
+        config.load_model::<B>(MODEL_PATH, &device)
+    } else {
+        println!("⚠️ Cảnh báo: Không tìm thấy file model. Đang dùng model ngẫu nhiên!");
+        println!("   (Để có model, hãy chạy train.py hoặc export từ Kaggle)");
+        config.init::<B>(&device)
+    };
+
     ucci_loop_generic::<B>(model, device);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Perft mode
     if args.len() > 1 && args[1] == "perft" {
         let mut board = Board::new();
         board.set_initial_position();
@@ -31,14 +45,20 @@ fn main() {
         return;
     }
 
-    let mode = HardwareMode::CpuNdArray; // TODO: read from config
+    // Detect hardware mode from args or default to CPU
+    let mode = if args.len() > 1 && args[1] == "gpu" {
+        HardwareMode::GpuWgpu
+    } else {
+        HardwareMode::CpuNdArray
+    };
+
     match mode {
         HardwareMode::CpuNdArray => {
-            println!("🚀 Khởi động Engine với CPU (NdArray)...");
+            println!("🚀 Khởi động Wisdom Engine (MCTS + CNN) với CPU (NdArray)...");
             start_engine::<NdArray<f32>>(NdArrayDevice::Cpu);
         }
         HardwareMode::GpuWgpu => {
-            println!("🚀 Khởi động Engine với GPU (Wgpu)...");
+            println!("🚀 Khởi động Wisdom Engine (MCTS + CNN) với GPU (Wgpu)...");
             start_engine::<Wgpu<f32, i32>>(WgpuDevice::default());
         }
     }
