@@ -149,7 +149,11 @@ fn run_repetition_scenario(fen: &str, moves: &[&str]) -> RepetitionResult {
         let m = parse_algebraic(&board, alg_move);
 
         let piece = board.piece_at(m.from_sq()).unwrap();
-        let is_reversible = piece.piece_type != PieceType::Pawn;
+        let is_reversible = piece.piece_type != PieceType::Pawn || {
+            let (from_row, _) = Board::square_to_coord(m.from_sq());
+            let (to_row, _) = Board::square_to_coord(m.to_sq());
+            from_row == to_row
+        };
         let moving_side = board.side_to_move;
 
         let pre_threats = if is_reversible {
@@ -232,4 +236,16 @@ fn test_diagram_4_mutual_perpetual_check() {
     // Khi gọi judge_repetition, cả our_violation và opp_violation đều sẽ là PerpetualCheck (2).
     // 2 == 2 -> Trả về Draw.
     assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
+
+#[test]
+fn test_diagram_5_perpetual_check_with_multiple_pieces() {
+    let fen = "5c3/8R/4k2P1/3P5/5P3/6P2/5pH2/5A3/4CK3/6rh1 w - - 0 1";
+
+    let moves = [
+        "P4=5", "P6=5", "P5=4", "P5=6", "P4=5", "P6=5", "P5=4", "P5=6", "P4=5", "P6=5", "P5=4",
+        "P5=6",
+    ];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Loss);
 }

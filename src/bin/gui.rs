@@ -1,5 +1,5 @@
 use macroquad::prelude::*;
-use wisdom::board::{Board, Color as PieceColor, PieceType, HistoryEntry, RepetitionResult};
+use wisdom::board::{Board, Color as PieceColor, HistoryEntry, PieceType, RepetitionResult};
 use wisdom::r#move::Move;
 use wisdom::search::search_best_move;
 
@@ -20,18 +20,26 @@ fn get_legal_moves(board: &mut Board) -> Vec<Move> {
     moves.append(&mut quiets);
     let moving_side = board.side_to_move;
 
-    moves.into_iter().filter(|&m| {
-        let undo = board.make_move(m);
-        let valid = !board.kings_facing() && !board.is_in_check(moving_side);
-        board.unmake_move(m, undo);
-        valid
-    }).collect()
+    moves
+        .into_iter()
+        .filter(|&m| {
+            let undo = board.make_move(m);
+            let valid = !board.kings_facing() && !board.is_in_check(moving_side);
+            board.unmake_move(m, undo);
+            valid
+        })
+        .collect()
 }
 
 fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry>) {
     let is_capture = !board.is_empty(m.to_sq());
     let piece = board.piece_at(m.from_sq()).unwrap();
-    let is_reversible = !is_capture && piece.piece_type != PieceType::Pawn;
+    let is_reversible = !is_capture
+        && (piece.piece_type != PieceType::Pawn || {
+            let (from_row, _) = Board::square_to_coord(m.from_sq());
+            let (to_row, _) = Board::square_to_coord(m.to_sq());
+            from_row == to_row
+        });
     let moving_side = board.side_to_move;
 
     // Compute pre-move threats BEFORE making the move
@@ -68,13 +76,48 @@ fn draw_board() {
     for col in 0..9 {
         let x = OFFSET_X + col as f32 * SQUARE_SIZE;
         draw_line(x, OFFSET_Y, x, OFFSET_Y + 4.0 * SQUARE_SIZE, 2.0, BLACK);
-        draw_line(x, OFFSET_Y + 5.0 * SQUARE_SIZE, x, OFFSET_Y + 9.0 * SQUARE_SIZE, 2.0, BLACK);
+        draw_line(
+            x,
+            OFFSET_Y + 5.0 * SQUARE_SIZE,
+            x,
+            OFFSET_Y + 9.0 * SQUARE_SIZE,
+            2.0,
+            BLACK,
+        );
     }
     // Edges across the river
-    draw_line(OFFSET_X, OFFSET_Y + 4.0 * SQUARE_SIZE, OFFSET_X + 8.0 * SQUARE_SIZE, OFFSET_Y + 4.0 * SQUARE_SIZE, 2.0, BLACK);
-    draw_line(OFFSET_X, OFFSET_Y + 5.0 * SQUARE_SIZE, OFFSET_X + 8.0 * SQUARE_SIZE, OFFSET_Y + 5.0 * SQUARE_SIZE, 2.0, BLACK);
-    draw_line(OFFSET_X, OFFSET_Y + 4.0 * SQUARE_SIZE, OFFSET_X, OFFSET_Y + 5.0 * SQUARE_SIZE, 2.0, BLACK);
-    draw_line(OFFSET_X + 8.0 * SQUARE_SIZE, OFFSET_Y + 4.0 * SQUARE_SIZE, OFFSET_X + 8.0 * SQUARE_SIZE, OFFSET_Y + 5.0 * SQUARE_SIZE, 2.0, BLACK);
+    draw_line(
+        OFFSET_X,
+        OFFSET_Y + 4.0 * SQUARE_SIZE,
+        OFFSET_X + 8.0 * SQUARE_SIZE,
+        OFFSET_Y + 4.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+    draw_line(
+        OFFSET_X,
+        OFFSET_Y + 5.0 * SQUARE_SIZE,
+        OFFSET_X + 8.0 * SQUARE_SIZE,
+        OFFSET_Y + 5.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+    draw_line(
+        OFFSET_X,
+        OFFSET_Y + 4.0 * SQUARE_SIZE,
+        OFFSET_X,
+        OFFSET_Y + 5.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+    draw_line(
+        OFFSET_X + 8.0 * SQUARE_SIZE,
+        OFFSET_Y + 4.0 * SQUARE_SIZE,
+        OFFSET_X + 8.0 * SQUARE_SIZE,
+        OFFSET_Y + 5.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
 
     for row in 0..10 {
         let y = OFFSET_Y + row as f32 * SQUARE_SIZE;
@@ -82,24 +125,71 @@ fn draw_board() {
     }
 
     // Palaces
-    draw_line(OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y, OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y + 2.0 * SQUARE_SIZE, 2.0, BLACK);
-    draw_line(OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y, OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y + 2.0 * SQUARE_SIZE, 2.0, BLACK);
-    
-    draw_line(OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y + 7.0 * SQUARE_SIZE, OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y + 9.0 * SQUARE_SIZE, 2.0, BLACK);
-    draw_line(OFFSET_X + 5.0 * SQUARE_SIZE, OFFSET_Y + 7.0 * SQUARE_SIZE, OFFSET_X + 3.0 * SQUARE_SIZE, OFFSET_Y + 9.0 * SQUARE_SIZE, 2.0, BLACK);
+    draw_line(
+        OFFSET_X + 3.0 * SQUARE_SIZE,
+        OFFSET_Y,
+        OFFSET_X + 5.0 * SQUARE_SIZE,
+        OFFSET_Y + 2.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+    draw_line(
+        OFFSET_X + 5.0 * SQUARE_SIZE,
+        OFFSET_Y,
+        OFFSET_X + 3.0 * SQUARE_SIZE,
+        OFFSET_Y + 2.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+
+    draw_line(
+        OFFSET_X + 3.0 * SQUARE_SIZE,
+        OFFSET_Y + 7.0 * SQUARE_SIZE,
+        OFFSET_X + 5.0 * SQUARE_SIZE,
+        OFFSET_Y + 9.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
+    draw_line(
+        OFFSET_X + 5.0 * SQUARE_SIZE,
+        OFFSET_Y + 7.0 * SQUARE_SIZE,
+        OFFSET_X + 3.0 * SQUARE_SIZE,
+        OFFSET_Y + 9.0 * SQUARE_SIZE,
+        2.0,
+        BLACK,
+    );
 
     // Draw "River" text (optional, simple decorative text)
-    draw_text("楚 河             漢 界", OFFSET_X + 1.5 * SQUARE_SIZE, OFFSET_Y + 4.6 * SQUARE_SIZE, 30.0, BLACK);
+    draw_text(
+        "楚 河             漢 界",
+        OFFSET_X + 1.5 * SQUARE_SIZE,
+        OFFSET_Y + 4.6 * SQUARE_SIZE,
+        30.0,
+        BLACK,
+    );
 }
 
 fn display_row(r: usize, human_color: PieceColor) -> usize {
-    if human_color == PieceColor::Red { r } else { 9 - r }
+    if human_color == PieceColor::Red {
+        r
+    } else {
+        9 - r
+    }
 }
 fn display_col(c: usize, human_color: PieceColor) -> usize {
-    if human_color == PieceColor::Red { c } else { 8 - c }
+    if human_color == PieceColor::Red {
+        c
+    } else {
+        8 - c
+    }
 }
 
-fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move], human_color: PieceColor) {
+fn draw_pieces(
+    board: &Board,
+    selected_sq: Option<usize>,
+    legal_moves: &[Move],
+    human_color: PieceColor,
+) {
     for row in 0..10 {
         for col in 0..9 {
             let sq = Board::coord_to_square(row, col);
@@ -119,7 +209,16 @@ fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move], 
             }
 
             if let Some(piece) = board.piece_at(sq) {
-                draw_circle(x, y, RADIUS, if piece.color == PieceColor::Red { RED } else { BLACK });
+                draw_circle(
+                    x,
+                    y,
+                    RADIUS,
+                    if piece.color == PieceColor::Red {
+                        RED
+                    } else {
+                        BLACK
+                    },
+                );
                 draw_circle_lines(x, y, RADIUS, 2.0, WHITE);
 
                 let text = match piece.piece_type {
@@ -133,7 +232,13 @@ fn draw_pieces(board: &Board, selected_sq: Option<usize>, legal_moves: &[Move], 
                 };
 
                 let text_size = measure_text(text, None, 30, 1.0);
-                draw_text(text, x - text_size.width / 2.0, y + text_size.height / 2.0, 30.0, WHITE);
+                draw_text(
+                    text,
+                    x - text_size.width / 2.0,
+                    y + text_size.height / 2.0,
+                    30.0,
+                    WHITE,
+                );
             }
         }
     }
@@ -143,10 +248,16 @@ fn draw_button(text: &str, x: f32, y: f32, w: f32, h: f32, active: bool, color: 
     let bg_color = if active { GREEN } else { color };
     draw_rectangle(x, y, w, h, bg_color);
     draw_rectangle_lines(x, y, w, h, 2.0, BLACK);
-    
+
     let text_size = measure_text(text, None, 20, 1.0);
-    draw_text(text, x + (w - text_size.width) / 2.0, y + (h + text_size.height) / 2.0, 20.0, WHITE);
-    
+    draw_text(
+        text,
+        x + (w - text_size.width) / 2.0,
+        y + (h + text_size.height) / 2.0,
+        20.0,
+        WHITE,
+    );
+
     if is_mouse_button_pressed(MouseButton::Left) {
         let (mx, my) = mouse_position();
         if mx >= x && mx <= x + w && my >= y && my <= y + h {
@@ -212,7 +323,15 @@ async fn main() {
         // Game Mode Toggle
         draw_text("Game Mode:", panel_x, py, 20.0, BLACK);
         py += 25.0;
-        if draw_button("Engine vs Player", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsPlayer, GRAY) {
+        if draw_button(
+            "Engine vs Player",
+            panel_x,
+            py,
+            180.0,
+            30.0,
+            game_mode == GameMode::EngineVsPlayer,
+            GRAY,
+        ) {
             game_mode = GameMode::EngineVsPlayer;
             board.set_initial_position();
             game_history.clear();
@@ -223,7 +342,15 @@ async fn main() {
             current_eval = Some(board.evaluate());
         }
         py += 40.0;
-        if draw_button("Engine vs Engine", panel_x, py, 180.0, 30.0, game_mode == GameMode::EngineVsEngine, GRAY) {
+        if draw_button(
+            "Engine vs Engine",
+            panel_x,
+            py,
+            180.0,
+            30.0,
+            game_mode == GameMode::EngineVsEngine,
+            GRAY,
+        ) {
             game_mode = GameMode::EngineVsEngine;
             board.set_initial_position();
             game_history.clear();
@@ -239,7 +366,15 @@ async fn main() {
         if game_mode == GameMode::EngineVsPlayer {
             draw_text("Player Side:", panel_x, py, 20.0, BLACK);
             py += 25.0;
-            if draw_button("Play Red", panel_x, py, 80.0, 30.0, human_color == PieceColor::Red, GRAY) {
+            if draw_button(
+                "Play Red",
+                panel_x,
+                py,
+                80.0,
+                30.0,
+                human_color == PieceColor::Red,
+                GRAY,
+            ) {
                 human_color = PieceColor::Red;
                 board.set_initial_position();
                 game_history.clear();
@@ -249,7 +384,15 @@ async fn main() {
                 game_over_message = "GAME OVER".into();
                 current_eval = Some(board.evaluate());
             }
-            if draw_button("Play Black", panel_x + 90.0, py, 90.0, 30.0, human_color == PieceColor::Black, GRAY) {
+            if draw_button(
+                "Play Black",
+                panel_x + 90.0,
+                py,
+                90.0,
+                30.0,
+                human_color == PieceColor::Black,
+                GRAY,
+            ) {
                 human_color = PieceColor::Black;
                 board.set_initial_position();
                 game_history.clear();
@@ -263,46 +406,74 @@ async fn main() {
         }
 
         // Search Depth
-        draw_text(&format!("Depth: {}", search_depth), panel_x, py, 20.0, BLACK);
+        draw_text(
+            &format!("Depth: {}", search_depth),
+            panel_x,
+            py,
+            20.0,
+            BLACK,
+        );
         py += 25.0;
         if draw_button("-", panel_x, py, 40.0, 30.0, false, GRAY) {
-            if search_depth > 1 { search_depth -= 1; }
+            if search_depth > 1 {
+                search_depth -= 1;
+            }
         }
         if draw_button("+", panel_x + 50.0, py, 40.0, 30.0, false, GRAY) {
-            if search_depth < 10 { search_depth += 1; }
-        }
-        py += 50.0;
-
-        // Eval Display
-        if game_mode == GameMode::EngineVsEngine || (game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color) {
-            if let Some(eval) = current_eval {
-                draw_text(&format!("Eval: {}", eval), panel_x, py, 30.0, match eval {
-                    e if e > 500 => DARKGREEN,
-                    e if e < -500 => MAROON,
-                    _ => BLACK
-                });
+            if search_depth < 10 {
+                search_depth += 1;
             }
         }
         py += 50.0;
 
+        // Eval Display
+        if game_mode == GameMode::EngineVsEngine
+            || (game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color)
+        {
+            if let Some(eval) = current_eval {
+                draw_text(
+                    &format!("Eval: {}", eval),
+                    panel_x,
+                    py,
+                    30.0,
+                    match eval {
+                        e if e > 500 => DARKGREEN,
+                        e if e < -500 => MAROON,
+                        _ => BLACK,
+                    },
+                );
+            }
+        }
+
         if game_over {
             draw_text(&game_over_message, OFFSET_X, OFFSET_Y / 2.0, 30.0, RED);
         }
-        
+
         // --- GAME LOGIC ---
         if !game_over {
-            let is_human_turn = game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color;
+            let is_human_turn =
+                game_mode == GameMode::EngineVsPlayer && board.side_to_move == human_color;
 
             if is_human_turn {
                 // Human Turn handling
                 if is_mouse_button_pressed(MouseButton::Left) {
                     let (mx, my) = mouse_position();
-                    let d_col = ((mx - OFFSET_X + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
-                    let d_row = ((my - OFFSET_Y + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
+                    let d_col =
+                        ((mx - OFFSET_X + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
+                    let d_row =
+                        ((my - OFFSET_Y + SQUARE_SIZE / 2.0) / SQUARE_SIZE).floor() as isize;
 
                     if d_col >= 0 && d_col < 9 && d_row >= 0 && d_row < 10 {
-                        let c = if human_color == PieceColor::Red { d_col as usize } else { 8 - (d_col as usize) };
-                        let r = if human_color == PieceColor::Red { d_row as usize } else { 9 - (d_row as usize) };
+                        let c = if human_color == PieceColor::Red {
+                            d_col as usize
+                        } else {
+                            8 - (d_col as usize)
+                        };
+                        let r = if human_color == PieceColor::Red {
+                            d_row as usize
+                        } else {
+                            9 - (d_row as usize)
+                        };
                         let sq = Board::coord_to_square(r, c);
 
                         if selected_sq.is_some() {
@@ -344,7 +515,10 @@ async fn main() {
                                 if let Some(piece) = board.piece_at(sq) {
                                     if piece.color == human_color {
                                         selected_sq = Some(sq);
-                                        legal_moves = get_legal_moves(&mut board).into_iter().filter(|m| m.from_sq() == sq).collect();
+                                        legal_moves = get_legal_moves(&mut board)
+                                            .into_iter()
+                                            .filter(|m| m.from_sq() == sq)
+                                            .collect();
                                     } else {
                                         selected_sq = None;
                                         legal_moves.clear();
@@ -359,7 +533,10 @@ async fn main() {
                             if let Some(piece) = board.piece_at(sq) {
                                 if piece.color == human_color {
                                     selected_sq = Some(sq);
-                                    legal_moves = get_legal_moves(&mut board).into_iter().filter(|m| m.from_sq() == sq).collect();
+                                    legal_moves = get_legal_moves(&mut board)
+                                        .into_iter()
+                                        .filter(|m| m.from_sq() == sq)
+                                        .collect();
                                 }
                             }
                         }
@@ -368,14 +545,15 @@ async fn main() {
             } else {
                 // Engine Turn handling
                 next_frame().await; // render human move or previous frame
-                
+
                 let all_moves = get_legal_moves(&mut board);
                 if all_moves.is_empty() {
                     game_over = true;
                     game_over_message = "Checkmate!".into();
                     current_eval = Some(-20000);
                 } else {
-                    let best_move = search_best_move(&mut board, search_depth, &mut tt, &game_history);
+                    let best_move =
+                        search_best_move(&mut board, search_depth, &mut tt, &game_history);
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
                     match board.judge_repetition(&game_history, game_history.len()) {

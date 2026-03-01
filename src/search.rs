@@ -4,7 +4,12 @@ use crate::r#move::Move;
 pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
-pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::TranspositionTable, game_history: &[HistoryEntry]) -> Move {
+pub fn search_best_move(
+    board: &mut Board,
+    depth: u8,
+    tt: &mut crate::tt::TranspositionTable,
+    game_history: &[HistoryEntry],
+) -> Move {
     let mut history = game_history.to_vec();
     let mut best_move = None;
     let mut alpha = -INFINITY;
@@ -24,7 +29,10 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
 
     // TT move to front of captures
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = captures.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+        if let Some(pos) = captures
+            .iter()
+            .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
+        {
             captures.swap(0, pos);
         }
     }
@@ -64,15 +72,21 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
 
         // TT move to front of quiets
         if let Some(t_mv) = tt_move {
-            if let Some(pos) = quiets.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+            if let Some(pos) = quiets
+                .iter()
+                .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
+            {
                 quiets.swap(0, pos);
             }
         }
 
         for m in &quiets {
             let piece = board.piece_at(m.from_sq()).unwrap();
-            let is_reversible = piece.piece_type != crate::board::PieceType::Pawn;
-
+            let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
+                let (from_row, _) = Board::square_to_coord(m.from_sq());
+                let (to_row, _) = Board::square_to_coord(m.to_sq());
+                from_row == to_row
+            };
             let pre_threats = if is_reversible {
                 board.get_unprotected_threats(moving_side)
             } else {
@@ -116,7 +130,14 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
     }
 
     if let Some(bm) = best_move {
-        tt.record(board.zobrist_key, depth, 0, alpha, crate::tt::FLAG_EXACT, Some(bm));
+        tt.record(
+            board.zobrist_key,
+            depth,
+            0,
+            alpha,
+            crate::tt::FLAG_EXACT,
+            Some(bm),
+        );
     }
 
     // Fallback: if no best_move found, pick first legal move
@@ -127,15 +148,24 @@ pub fn search_best_move(board: &mut Board, depth: u8, tt: &mut crate::tt::Transp
             let undo = board.make_move(*m);
             let legal = !board.kings_facing() && !board.is_in_check(moving_side);
             board.unmake_move(*m, undo);
-            if legal { return *m; }
+            if legal {
+                return *m;
+            }
         }
     }
 
     best_move.unwrap()
 }
 
-fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt: &mut crate::tt::TranspositionTable, history: &mut Vec<HistoryEntry>) -> i32 {
-    
+fn negamax(
+    board: &mut Board,
+    depth: u8,
+    ply: u8,
+    mut alpha: i32,
+    beta: i32,
+    tt: &mut crate::tt::TranspositionTable,
+    history: &mut Vec<HistoryEntry>,
+) -> i32 {
     // Algorithm 10: Quick prune if draw beats beta and we are idle
     if board.judge_prune(history, history.len(), beta) {
         return 0;
@@ -174,7 +204,10 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
 
     // TT move to front of captures
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = captures.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+        if let Some(pos) = captures
+            .iter()
+            .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
+        {
             captures.swap(0, pos);
         }
     }
@@ -224,7 +257,10 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
 
     // TT move to front of quiets
     if let Some(t_mv) = tt_move {
-        if let Some(pos) = quiets.iter().position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq()) {
+        if let Some(pos) = quiets
+            .iter()
+            .position(|&m| m.to_sq() == t_mv.to_sq() && m.from_sq() == t_mv.from_sq())
+        {
             quiets.swap(0, pos);
         }
     }
@@ -302,7 +338,7 @@ fn negamax(board: &mut Board, depth: u8, ply: u8, mut alpha: i32, beta: i32, tt:
 fn mvv_lva(board: &Board, m: Move) -> i32 {
     let victim = board.piece_at(m.to_sq()).unwrap();
     let attacker = board.piece_at(m.from_sq()).unwrap();
-    
+
     // Prioritize high value victim, then low value attacker
     // e.g. Pawn taking Rook = 900*100 - 100 = 89900
     victim.piece_type.value() * 100 - attacker.piece_type.value()
@@ -343,5 +379,3 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
 
     alpha
 }
-
-
