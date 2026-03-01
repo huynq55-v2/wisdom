@@ -4,20 +4,24 @@ use wisdom::ucci::parse_fen;
 /// Hàm dịch ký hiệu đại số (VD: R4+1, K5=4) sang nước đi (Move) hợp lệ của Engine
 fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
     let chars: Vec<char> = alg.chars().collect();
-    let p_char = chars[0];
-    let start_file_digit = chars[1].to_digit(10).unwrap() as u8;
-    let op = chars[2];
-    let arg_digit = chars[3].to_digit(10).unwrap() as u8;
+    let is_front_back = chars[0] == '+' || chars[0] == '-';
+
+    let (modifier, p_char, start_file_digit, op, arg_digit) = if is_front_back {
+        // Định dạng Tiền/Hậu: VD "+R+2"
+        let p = chars[1];
+        let op = chars[2];
+        let arg = chars[3].to_digit(10).unwrap() as u8;
+        (Some(chars[0]), p, None, op, arg)
+    } else {
+        // Định dạng thông thường: VD "R2+1"
+        let p = chars[0];
+        let file = chars[1].to_digit(10).unwrap() as u8;
+        let op = chars[2];
+        let arg = chars[3].to_digit(10).unwrap() as u8;
+        (None, p, Some(file), op, arg)
+    };
 
     let moving_side = board.side_to_move;
-
-    // Đỏ đếm 1-9 từ phải sang trái (9 -> 1 theo tọa độ cột UCCI)
-    // Đen đếm 1-9 từ trái sang phải (1 -> 9 theo tọa độ cột UCCI)
-    let expected_from_col = if moving_side == Color::Red {
-        9 - start_file_digit
-    } else {
-        start_file_digit - 1
-    };
 
     let expected_piece_type = match p_char {
         'K' => PieceType::King,
@@ -30,6 +34,56 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
         _ => panic!("Unknown piece type: {}", p_char),
     };
 
+    let mut expected_from_col_index: Option<u8> = None;
+    let mut expected_from_row_index: Option<usize> = None;
+
+    if let Some(file_digit) = start_file_digit {
+        // Phân tích cột xuất phát theo định dạng cũ
+        let col = if moving_side == Color::Red {
+            9 - file_digit
+        } else {
+            file_digit - 1
+        };
+        expected_from_col_index = Some(col);
+    } else if let Some(mod_char) = modifier {
+        // Quét bàn cờ tìm cột có 2 quân cùng loại
+        let mut col_pieces: [Vec<usize>; 9] = Default::default();
+        for sq in 0..256 {
+            if !Board::is_valid_square(sq) {
+                continue;
+            }
+            if let Some(piece) = board.piece_at(sq) {
+                if piece.piece_type == expected_piece_type && piece.color == moving_side {
+                    let (r, c) = Board::square_to_coord(sq);
+                    col_pieces[c].push(r);
+                }
+            }
+        }
+
+        // Xác định hàng (row) của quân Tiền/Hậu
+        for c in 0..9 {
+            if col_pieces[c].len() >= 2 {
+                col_pieces[c].sort(); // Sắp xếp hàng từ 0 -> 9 (Từ trên xuống dưới)
+                expected_from_col_index = Some(c as u8);
+
+                // Đỏ ở dưới (hàng 9) tiến lên trên (hàng 0) -> Quân Tiền có hàng NHỎ hơn
+                // Đen ở trên (hàng 0) tiến xuống dưới (hàng 9) -> Quân Tiền có hàng LỚN hơn
+                let (front_row, back_row) = if moving_side == Color::Red {
+                    (col_pieces[c][0], col_pieces[c][col_pieces[c].len() - 1])
+                } else {
+                    (col_pieces[c][col_pieces[c].len() - 1], col_pieces[c][0])
+                };
+
+                if mod_char == '+' {
+                    expected_from_row_index = Some(front_row); // Tiền (+)
+                } else if mod_char == '-' {
+                    expected_from_row_index = Some(back_row); // Hậu (-)
+                }
+                break;
+            }
+        }
+    }
+
     let mut moves = board.generate_captures();
     moves.append(&mut board.generate_quiets());
 
@@ -40,8 +94,18 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
         let (from_row, from_col) = Board::square_to_coord(from_sq);
         let (to_row, to_col) = Board::square_to_coord(to_sq);
 
-        if from_col as u8 != expected_from_col {
-            continue;
+        // Kiểm tra cột xuất phát
+        if let Some(exp_c) = expected_from_col_index {
+            if from_col as u8 != exp_c {
+                continue;
+            }
+        }
+
+        // Kiểm tra hàng xuất phát (Chỉ dùng cho Tiền/Hậu)
+        if let Some(exp_r) = expected_from_row_index {
+            if from_row != exp_r {
+                continue;
+            }
         }
 
         let piece = board.piece_at(from_sq).unwrap();
@@ -72,7 +136,6 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
             '+' => {
                 // Tiến
                 if is_straight {
-                    // Quân đi thẳng: số phía sau là số bước tiến
                     if from_col != to_col {
                         continue;
                     }
@@ -85,7 +148,6 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
                         return m;
                     }
                 } else {
-                    // Quân đi chéo (Mã, Tượng, Sĩ): số phía sau là cột mục tiêu
                     let expected_to_col = if moving_side == Color::Red {
                         9 - arg_digit
                     } else {
@@ -104,7 +166,6 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
             '-' => {
                 // Thoái
                 if is_straight {
-                    // Quân đi thẳng: số phía sau là số bước lùi
                     if from_col != to_col {
                         continue;
                     }
@@ -117,7 +178,6 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
                         return m;
                     }
                 } else {
-                    // Quân đi chéo: số phía sau là cột mục tiêu
                     let expected_to_col = if moving_side == Color::Red {
                         9 - arg_digit
                     } else {
@@ -284,4 +344,15 @@ fn test_diagram_9() {
     let moves = ["C7=5", "C6=5", "C5=2", "C5=8", "C2=5", "C8=5", "C5=2"];
 
     assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Draw);
+}
+
+#[test]
+fn test_diagram_18() {
+    let fen = "2eakae2/3r5/2h1c2c1/p1R1p1p2/7hp/2P2CP2/P2rP3P/2H1C1H2/4A4/2E1KAE1R w - - 0 1";
+
+    let moves = [
+        "C4-1", "+R+2", "C4-2", "+R-2", "C4+2", "+R+2", "C4-2", "+R-2", "C4+2",
+    ];
+
+    assert_eq!(run_repetition_scenario(fen, &moves), RepetitionResult::Win);
 }
