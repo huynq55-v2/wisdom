@@ -16,7 +16,9 @@ pub fn evaluate_node(board: &Board, eval_tx: Option<&Sender<EvalRequest>>) -> i3
                 response_tx: tx,
             })
             .unwrap();
+        // println!("search thread: sent req, waiting for resp...");
         let nn_value = rx.recv().unwrap();
+        // println!("search thread: recv resp {}", nn_value);
         (nn_value * 10000.0) as i32
     } else {
         board.evaluate()
@@ -220,6 +222,9 @@ fn negamax(
     let orig_alpha = alpha;
 
     if depth == 0 {
+        if eval_tx.is_some() {
+            return evaluate_node(board, eval_tx);
+        }
         return quiescence(board, alpha, beta, eval_tx);
     }
 
@@ -454,9 +459,9 @@ pub fn search_best_move_parallel(
     let best_score_global = std::sync::Mutex::new(-INFINITY);
 
     std::thread::scope(|s| {
-        for _ in 0..num_threads {
-            // Lazy SMP: all threads run identical search initially, but lock-less TT
-            // interactions will differentiate their paths slightly.
+        for thread_id in 0..num_threads {
+            // Lazy SMP: thread 0 runs the target depth, helper threads run deeper/shallower depths
+            // to probe and fill the TT from different paths.
             let mut local_board = board.clone();
             let local_history = game_history.to_vec();
 
@@ -464,23 +469,36 @@ pub fn search_best_move_parallel(
             let bs = &best_score_global;
 
             s.spawn(move || {
-                let m =
-                    search_best_move(&mut local_board, depth, tt, &local_history, Some(eval_tx));
+                // Thread 0 searches the full depth.
+                // Helper threads search shallower depths to rapidly populate the TT
+                // and guide the main thread without blowing up the node count.
+                let offset = (thread_id as u8) % 3; // offsets: 0, 1, 2
+                let thread_depth = if depth > offset { depth - offset } else { 1 };
 
-                // Get score from TT for root board
-                let score = if let Some((tt_score, _)) =
-                    tt.probe(local_board.zobrist_key, depth, 0, -INFINITY, INFINITY)
-                {
-                    tt_score
-                } else {
-                    -INFINITY
-                };
+                let m = search_best_move(
+                    &mut local_board,
+                    thread_depth,
+                    tt,
+                    &local_history,
+                    Some(eval_tx),
+                );
 
-                let mut bs_guard = bs.lock().unwrap();
-                if score > *bs_guard {
-                    let mut bg_guard = bg.lock().unwrap();
-                    *bs_guard = score;
-                    *bg_guard = Some(m);
+                if thread_id == 0 {
+                    // Get score from TT for root board
+                    let score = if let Some((tt_score, _)) =
+                        tt.probe(local_board.zobrist_key, depth, 0, -INFINITY, INFINITY)
+                    {
+                        tt_score
+                    } else {
+                        -INFINITY
+                    };
+
+                    let mut bs_guard = bs.lock().unwrap();
+                    if score > *bs_guard {
+                        let mut bg_guard = bg.lock().unwrap();
+                        *bs_guard = score;
+                        *bg_guard = Some(m);
+                    }
                 }
             });
         }

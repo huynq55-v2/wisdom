@@ -34,6 +34,7 @@ impl EvalQueue {
                 response_channels.clear();
 
                 // Block until we get the first request
+                // println!("EvalQueue: waiting for req...");
                 match rx.recv() {
                     Ok(req) => {
                         batch_inputs.extend_from_slice(&req.tensor_data);
@@ -64,6 +65,10 @@ impl EvalQueue {
                     continue;
                 }
 
+                // println!("EvalQueue: executing batch size {}", current_batch_size);
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+
                 // Load to tensor
                 let inputs = Tensor::<B, 1>::from_data(batch_inputs.as_slice(), &device).reshape([
                     current_batch_size,
@@ -75,9 +80,12 @@ impl EvalQueue {
                 // Forward pass on GPU
                 let predictions = model.forward(inputs);
 
+                // println!("EvalQueue: reading predictions back to CPU...");
                 // Read values back
                 // This call may block waiting for GPU synchronization
                 let values = predictions.into_data().to_vec::<f32>().unwrap();
+
+                // println!("EvalQueue: dispatching {} values", values.len());
 
                 // Dispatch results to waiting threads
                 for (i, resp_tx) in response_channels.drain(..).enumerate() {

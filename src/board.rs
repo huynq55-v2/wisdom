@@ -139,6 +139,49 @@ impl Board {
         key
     }
 
+    pub fn to_fen(&self) -> String {
+        let mut fen = String::new();
+        for row in 0..10 {
+            let mut empty_count = 0;
+            for col in 0..9 {
+                let sq = Self::coord_to_square(row, col);
+                if let Some(piece) = self.piece_at(sq) {
+                    if empty_count > 0 {
+                        fen.push_str(&empty_count.to_string());
+                        empty_count = 0;
+                    }
+                    let mut c = match piece.piece_type {
+                        PieceType::King => 'K',
+                        PieceType::Advisor => 'A',
+                        PieceType::Elephant => 'E',
+                        PieceType::Horse => 'H',
+                        PieceType::Rook => 'R',
+                        PieceType::Cannon => 'C',
+                        PieceType::Pawn => 'P',
+                    };
+                    if piece.color == Color::Black {
+                        c = c.to_ascii_lowercase();
+                    }
+                    fen.push(c);
+                } else {
+                    empty_count += 1;
+                }
+            }
+            if empty_count > 0 {
+                fen.push_str(&empty_count.to_string());
+            }
+            if row < 9 {
+                fen.push('/');
+            }
+        }
+        let stm = if self.side_to_move == Color::Red {
+            "w"
+        } else {
+            "b"
+        };
+        format!("{} {}", fen, stm)
+    }
+
     /// Checks if a square index is strictly within the 10x9 board boundaries.
     pub fn is_valid_square(square: usize) -> bool {
         // We use 16 columns per row.
