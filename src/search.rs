@@ -31,7 +31,7 @@ pub fn search_best_move(
     tt: &crate::tt::TranspositionTable,
     game_history: &[HistoryEntry],
     eval_tx: Option<&Sender<EvalRequest>>,
-) -> Move {
+) -> (Move, i32) {
     let mut history = game_history.to_vec();
     let mut best_move = None;
     let mut alpha = -INFINITY;
@@ -68,7 +68,7 @@ pub fn search_best_move(
         }
 
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = if gives_check { depth } else { depth - 1 };
+        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
 
         history.push(HistoryEntry {
             hash: board.zobrist_key,
@@ -132,7 +132,7 @@ pub fn search_best_move(
             }
 
             let gives_check = board.is_in_check(moving_side.opposite());
-            let next_depth = if gives_check { depth } else { depth - 1 };
+            let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
 
             let chased_set = if is_reversible && !gives_check {
                 let post_threats = board.get_unprotected_threats(moving_side);
@@ -189,12 +189,12 @@ pub fn search_best_move(
             let legal = !board.kings_facing() && !board.is_in_check(moving_side);
             board.unmake_move(*m, undo);
             if legal {
-                return *m;
+                return (*m, alpha);
             }
         }
     }
 
-    best_move.unwrap()
+    (best_move.unwrap(), alpha)
 }
 
 fn negamax(
@@ -267,7 +267,7 @@ fn negamax(
         has_legal_moves = true;
 
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = if gives_check { depth } else { depth - 1 };
+        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
 
         history.push(HistoryEntry {
             hash: board.zobrist_key,
@@ -320,7 +320,11 @@ fn negamax(
 
     for m in &quiets {
         let piece = board.piece_at(m.from_sq()).unwrap();
-        let is_reversible = piece.piece_type != crate::board::PieceType::Pawn;
+        let is_reversible = piece.piece_type != crate::board::PieceType::Pawn || {
+            let (from_row, _) = Board::square_to_coord(m.from_sq());
+            let (to_row, _) = Board::square_to_coord(m.to_sq());
+            from_row == to_row
+        };
 
         let pre_threats = if is_reversible {
             board.get_unprotected_threats(moving_side)
@@ -338,7 +342,7 @@ fn negamax(
         has_legal_moves = true;
 
         let gives_check = board.is_in_check(moving_side.opposite());
-        let next_depth = if gives_check { depth } else { depth - 1 };
+        let next_depth = depth - 1; // Tạm thời bỏ Check Extension để train RL
 
         let chased_set = if is_reversible && !gives_check {
             let post_threats = board.get_unprotected_threats(moving_side);
@@ -474,7 +478,7 @@ pub fn search_best_move_parallel(
                 // Thread 0: depth, Thread 1: depth+1, Thread 2: depth, Thread 3: depth+1, ...
                 let thread_depth = depth + (thread_id as u8 % 2);
 
-                let m = search_best_move(
+                let (m, score) = search_best_move(
                     &mut local_board,
                     thread_depth,
                     tt,
@@ -483,15 +487,6 @@ pub fn search_best_move_parallel(
                 );
 
                 if thread_id == 0 {
-                    // Get score from TT for root board
-                    let score = if let Some((tt_score, _)) =
-                        tt.probe(local_board.zobrist_key, depth, 0, -INFINITY, INFINITY)
-                    {
-                        tt_score
-                    } else {
-                        -INFINITY
-                    };
-
                     let mut bs_guard = bs.lock().unwrap();
                     if score > *bs_guard {
                         let mut bg_guard = bg.lock().unwrap();

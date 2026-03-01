@@ -167,7 +167,7 @@ pub fn ucci_loop() {
                     depth = tokens[2].parse().unwrap_or(4);
                 }
 
-                let best_move = search_best_move(&mut board, depth, &tt, &[], None);
+                let (best_move, _) = search_best_move(&mut board, depth, &tt, &[], None);
                 let move_str = move_to_ucci_string(best_move);
                 println!("bestmove {}", move_str);
             }

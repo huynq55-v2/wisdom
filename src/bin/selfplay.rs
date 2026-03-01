@@ -216,10 +216,14 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             _ => {}
         }
 
-        // 1. Search for best move and score
-        let depth = 4;
+        // 1. Giảm Depth xuống 2 trong những Iteration đầu tiên!
+        // (Khi nào NN có Policy Head để Move Ordering, bạn mới nên nâng lên 3 hoặc 4)
+        let depth = 2;
+
+        // 2. Tắt Lazy SMP bằng cách truyền num_threads = 1
+        // 32 ván cờ x 1 luồng = 32 luồng. Quá hoàn hảo để nhét đầy Batch Size của GPU!
         let (best_move, score) =
-            search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 8);
+            search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
 
         // Store FEN with the search score (will be overridden by ground truth later)
         let normalized_score = (score as f32 / 10000.0).clamp(-1.0, 1.0);
@@ -241,12 +245,11 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
 
         if is_capture {
             // Captures are never reversible in repetition logic
-            let pre_hash = board.zobrist_key;
             board.make_move(chosen_move);
             let gives_check = board.is_in_check(board.side_to_move);
 
             history.push(HistoryEntry {
-                hash: pre_hash,
+                hash: board.zobrist_key, // <-- Lấy hash sau khi make_move
                 is_check: gives_check,
                 chased_set: 0,
                 is_reversible: false,
@@ -266,7 +269,6 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
                 0
             };
 
-            let pre_hash = board.zobrist_key;
             board.make_move(chosen_move);
 
             let gives_check = board.is_in_check(board.side_to_move);
@@ -279,7 +281,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             };
 
             history.push(HistoryEntry {
-                hash: pre_hash,
+                hash: board.zobrist_key, // <-- Lấy hash sau khi make_move
                 is_check: gives_check,
                 chased_set,
                 is_reversible,
@@ -344,7 +346,7 @@ fn main() {
 
     let num_iterations = 10;
     let games_per_iteration = 100;
-    let concurrent_games = 32; // BUG FIX 4: Run 32 games in parallel to fill GPU batch
+    let concurrent_games = 32;
 
     for iteration in 1..=num_iterations {
         println!("============================================================");

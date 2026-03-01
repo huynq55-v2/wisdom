@@ -568,7 +568,7 @@ async fn main() {
                     game_over_message = "Checkmate!".into();
                     current_eval = Some(-20000);
                 } else {
-                    let best_move =
+                    let (best_move, _) =
                         search_best_move(&mut board, search_depth, &tt, &game_history, None);
                     apply_move_to_game(&mut board, best_move, &mut game_history);
 
