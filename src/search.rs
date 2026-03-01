@@ -210,13 +210,6 @@ fn negamax(
         return quiescence(board, alpha, beta, eval_tx);
     }
 
-    // Internal Node Policy Evaluation
-    let mut node_policy: Option<Vec<f32>> = None;
-    if eval_tx.is_some() {
-        let (_, p) = evaluate_node_with_policy(board, eval_tx);
-        node_policy = p;
-    }
-
     let mut tt_move = None;
     if let Some((score, best_tt)) = tt.probe(board.zobrist_key, depth, ply, alpha, beta) {
         if score != i32::MIN {
@@ -234,27 +227,14 @@ fn negamax(
     let mut all_moves = board.generate_captures();
     all_moves.append(&mut board.generate_quiets());
 
-    // Sort all moves by internal policy logits to prioritize promising branches
-    if let Some(ref policy) = node_policy {
-        all_moves.sort_by(|a, b| {
-            let idx_a = crate::nn::move_to_index(*a);
-            let idx_b = crate::nn::move_to_index(*b);
-            let logit_a = policy[idx_a];
-            let logit_b = policy[idx_b];
-            logit_b
-                .partial_cmp(&logit_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    } else {
-        // Fallback if no policy: Captures first (sorted by MVV-LVA)
-        all_moves.sort_by_cached_key(|&m| {
-            if board.piece_at(m.to_sq()).is_some() {
-                -mvv_lva(board, m) - 1000000
-            } else {
-                0
-            }
-        });
-    }
+    // Sort all moves: no policy at internal nodes, use MVV-LVA (CPU-only)
+    all_moves.sort_by_cached_key(|&m| {
+        if board.piece_at(m.to_sq()).is_some() {
+            -mvv_lva(board, m) - 1000000
+        } else {
+            0
+        }
+    });
 
     // TT move to front
     if let Some(t_mv) = tt_move {

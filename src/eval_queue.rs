@@ -41,14 +41,20 @@ impl EvalQueue {
                     Err(_) => break, // Channel closed, exit thread
                 }
 
-                // Try to collect more requests up to batch_size, instantly via try_recv
+                // Collect more requests up to batch_size with a small timeout
+                let batch_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
                 while response_channels.len() < batch_size {
-                    match rx.try_recv() {
+                    let now = std::time::Instant::now();
+                    if now >= batch_deadline {
+                        break;
+                    }
+                    match rx.recv_timeout(batch_deadline - now) {
                         Ok(req) => {
                             batch_inputs.extend_from_slice(&req.tensor_data);
                             response_channels.push(req.response_tx);
                         }
-                        Err(_) => break, // Queue trống, lập tức mang đi chạy GPU luôn!
+                        Err(_) => break, // Timeout or disconnected
                     }
                 }
 

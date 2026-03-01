@@ -100,10 +100,8 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
 ///   Conv2d(15→64, 3×3, pad=1) → BN → ReLU
 ///   Conv2d(64→128, 3×3, pad=1) → BN → ReLU
 ///   Conv2d(128→128, 3×3, pad=1) → BN → ReLU
-///   Global Average Pooling → [B, 128]
-///   Linear(128→64) → ReLU
-///   Linear(64→1) → Tanh
-///   Output: value in [-1.0, 1.0]
+///   ├─ Policy: Conv2d(128→2, 1×1) → Flatten [B,180] → Linear(180→8100)
+///   └─ Value:  GAP [B,128] → Linear(128→64) → ReLU → Linear(64→1) → Tanh
 #[derive(Module, Debug)]
 pub struct XiangqiNet<B: Backend> {
     conv1: Conv2d<B>,
@@ -112,8 +110,9 @@ pub struct XiangqiNet<B: Backend> {
     bn2: BatchNorm<B, 2>,
     conv3: Conv2d<B>,
     bn3: BatchNorm<B, 2>,
-    fc1: Linear<B>,
+    conv_policy: Conv2d<B>,
     policy_head: Linear<B>,
+    fc1: Linear<B>,
     value_head: Linear<B>,
     relu: Relu,
 }
@@ -137,8 +136,9 @@ impl XiangqiNetConfig {
                 .with_padding(burn::nn::PaddingConfig2d::Same)
                 .init(device),
             bn3: BatchNormConfig::new(128).init(device),
+            conv_policy: Conv2dConfig::new([128, 2], [1, 1]).init(device),
+            policy_head: LinearConfig::new(2 * BOARD_H * BOARD_W, ACTION_SPACE).init(device),
             fc1: LinearConfig::new(128, 64).init(device),
-            policy_head: LinearConfig::new(64, ACTION_SPACE).init(device),
             value_head: LinearConfig::new(64, 1).init(device),
             relu: Relu::new(),
         }
@@ -158,28 +158,26 @@ impl<B: Backend> XiangqiNet<B> {
         let x = self.bn2.forward(x);
         let x = self.relu.forward(x);
 
-        // Conv block 3
-        let x = self.conv3.forward(x);
-        let x = self.bn3.forward(x);
-        let x = self.relu.forward(x);
+        // Conv block 3 → x_spatial: [B, 128, 10, 9]
+        let x_spatial = self.conv3.forward(x);
+        let x_spatial = self.bn3.forward(x_spatial);
+        let x_spatial = self.relu.forward(x_spatial);
 
-        // Global Average Pooling: [B, 128, 10, 9] → [B, 128]
-        let [batch, channels, h, w] = x.dims();
+        let [batch, channels, h, w] = x_spatial.dims();
+
+        // --- BRANCH 1: POLICY HEAD (preserves spatial coordinates) ---
+        let x_pol = self.conv_policy.forward(x_spatial.clone()); // [B, 2, 10, 9]
+        let x_pol = x_pol.reshape([batch, 2 * h * w]); // [B, 180]
+        let logits_policy = self.policy_head.forward(x_pol);
+
+        // --- BRANCH 2: VALUE HEAD (Global Average Pooling) ---
         let spatial = h * w;
-        let x = x.reshape([batch, channels, spatial]); // [B, 128, 90]
-        let x = x.mean_dim(2); // [B, 128, 1]
-        let x = x.reshape([batch, channels]); // [B, 128]
-
-        // Shared FC
-        let x = self.fc1.forward(x);
-        let x = self.relu.forward(x);
-
-        // Policy head: [B, 64] -> [B, 8100]
-        let logits_policy = self.policy_head.forward(x.clone());
-
-        // Value head: [B, 64] -> [B, 1]
-        let value = self.value_head.forward(x);
-        let value = value.tanh(); // Squash value to [-1, 1]
+        let x_val = x_spatial.reshape([batch, channels, spatial]); // [B, 128, 90]
+        let x_val = x_val.mean_dim(2); // [B, 128, 1]
+        let x_val = x_val.reshape([batch, channels]); // [B, 128]
+        let x_val = self.fc1.forward(x_val);
+        let x_val = self.relu.forward(x_val);
+        let value = self.value_head.forward(x_val).tanh();
 
         (value, logits_policy)
     }
