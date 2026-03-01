@@ -7,13 +7,14 @@ pub const INFINITY: i32 = 50000;
 pub const MATE_VALUE: i32 = 20000;
 
 pub fn evaluate_node(board: &Board, eval_tx: Option<&Sender<EvalRequest>>) -> i32 {
-    let (val, _) = evaluate_node_with_policy(board, eval_tx);
+    let (val, _) = evaluate_node_with_policy(board, eval_tx, false);
     val
 }
 
 pub fn evaluate_node_with_policy(
     board: &Board,
     eval_tx: Option<&Sender<EvalRequest>>,
+    need_policy: bool,
 ) -> (i32, Option<Vec<f32>>) {
     if let Some(tx_queue) = eval_tx {
         let tensor = crate::nn::board_to_tensor(board);
@@ -22,11 +23,12 @@ pub fn evaluate_node_with_policy(
             .send(crate::eval_queue::EvalRequest {
                 tensor_data: tensor,
                 response_tx: tx,
+                need_policy,
             })
             .unwrap();
 
         let (nn_value, policy) = rx.recv().unwrap();
-        ((nn_value * 10000.0) as i32, Some(policy))
+        ((nn_value * 10000.0) as i32, policy)
     } else {
         (board.evaluate(), None)
     }
@@ -54,7 +56,7 @@ pub fn search_best_move(
     // Evaluate root policy for move ordering if NN is available
     let mut root_policy: Option<Vec<f32>> = None;
     if depth > 0 {
-        let (_, p) = evaluate_node_with_policy(board, eval_tx);
+        let (_, p) = evaluate_node_with_policy(board, eval_tx, true);
         root_policy = p;
     }
 
@@ -75,7 +77,7 @@ pub fn search_best_move(
         });
     } else {
         // Fallback if no policy: Captures first (sorted by MVV-LVA)
-        all_moves.sort_by_cached_key(|&m| {
+        all_moves.sort_unstable_by_key(|&m| {
             if board.piece_at(m.to_sq()).is_some() {
                 -mvv_lva(board, m) - 1000000
             } else {
@@ -227,7 +229,7 @@ fn negamax(
     // PHASE 1: Captures only (sorted by MVV-LVA, early cutoff)
     // =========================================================
     let mut captures = board.generate_captures();
-    captures.sort_by_cached_key(|&m| -mvv_lva(board, m));
+    captures.sort_unstable_by_key(|&m| -mvv_lva(board, m));
 
     // TT move to front of captures
     if let Some(t_mv) = tt_move {
@@ -412,7 +414,7 @@ fn quiescence(
     }
 
     let mut captures = board.generate_captures();
-    captures.sort_by_key(|&m| -mvv_lva(board, m)); // Higher score first
+    captures.sort_unstable_by_key(|&m| -mvv_lva(board, m)); // Higher score first
 
     let moving_side = board.side_to_move;
 

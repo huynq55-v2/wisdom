@@ -5,7 +5,8 @@ use std::thread;
 
 pub struct EvalRequest {
     pub tensor_data: [f32; TENSOR_SIZE],
-    pub response_tx: Sender<(f32, Vec<f32>)>,
+    pub response_tx: Sender<(f32, Option<Vec<f32>>)>,
+    pub need_policy: bool,
 }
 
 pub struct EvalQueue {
@@ -25,18 +26,17 @@ impl EvalQueue {
 
         thread::spawn(move || {
             let mut batch_inputs = Vec::with_capacity(batch_size * TENSOR_SIZE);
-            let mut response_channels = Vec::with_capacity(batch_size);
+            let mut requests: Vec<EvalRequest> = Vec::with_capacity(batch_size);
 
             loop {
                 batch_inputs.clear();
-                response_channels.clear();
+                requests.clear();
 
                 // Block until we get the first request
-                // println!("EvalQueue: waiting for req...");
                 match rx.recv() {
                     Ok(req) => {
                         batch_inputs.extend_from_slice(&req.tensor_data);
-                        response_channels.push(req.response_tx);
+                        requests.push(req);
                     }
                     Err(_) => break, // Channel closed, exit thread
                 }
@@ -44,7 +44,7 @@ impl EvalQueue {
                 // Collect more requests up to batch_size with a small timeout
                 let batch_deadline =
                     std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-                while response_channels.len() < batch_size {
+                while requests.len() < batch_size {
                     let now = std::time::Instant::now();
                     if now >= batch_deadline {
                         break;
@@ -52,20 +52,16 @@ impl EvalQueue {
                     match rx.recv_timeout(batch_deadline - now) {
                         Ok(req) => {
                             batch_inputs.extend_from_slice(&req.tensor_data);
-                            response_channels.push(req.response_tx);
+                            requests.push(req);
                         }
                         Err(_) => break, // Timeout or disconnected
                     }
                 }
 
-                let current_batch_size = response_channels.len();
+                let current_batch_size = requests.len();
                 if current_batch_size == 0 {
                     continue;
                 }
-
-                // println!("EvalQueue: executing batch size {}", current_batch_size);
-                use std::io::Write;
-                std::io::stdout().flush().unwrap();
 
                 // Load to tensor
                 let inputs = Tensor::<B, 1>::from_data(batch_inputs.as_slice(), &device).reshape([
@@ -80,16 +76,27 @@ impl EvalQueue {
 
                 // Read values back
                 let values = pred_value.into_data().to_vec::<f32>().unwrap();
-                let policies = pred_policy.into_data().to_vec::<f32>().unwrap();
+
+                // Only copy policy from GPU if at least one request needs it
+                let any_needs_policy = requests.iter().any(|r| r.need_policy);
+                let policies = if any_needs_policy {
+                    Some(pred_policy.into_data().to_vec::<f32>().unwrap())
+                } else {
+                    drop(pred_policy); // Free GPU memory immediately
+                    None
+                };
 
                 // Dispatch results to waiting threads
-                for (i, resp_tx) in response_channels.drain(..).enumerate() {
+                for (i, req) in requests.drain(..).enumerate() {
                     let v = values[i];
-                    // Slice the 8100 elements for this specific item in the batch
-                    let policy_start = i * crate::nn::ACTION_SPACE;
-                    let policy_end = policy_start + crate::nn::ACTION_SPACE;
-                    let p = policies[policy_start..policy_end].to_vec();
-                    let _ = resp_tx.send((v, p));
+                    let p = if req.need_policy {
+                        let start = i * crate::nn::ACTION_SPACE;
+                        let end = start + crate::nn::ACTION_SPACE;
+                        Some(policies.as_ref().unwrap()[start..end].to_vec())
+                    } else {
+                        None
+                    };
+                    let _ = req.response_tx.send((v, p));
                 }
             }
         });

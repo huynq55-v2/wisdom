@@ -390,7 +390,7 @@ fn main() {
         let iteration_data = Mutex::new(Vec::new());
 
         // 1. GENERATION PHASE
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 5);
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1);
         let eval_tx = eval_queue.tx.clone();
 
         // BUG FIX 4: Run games in parallel batches of `concurrent_games`
