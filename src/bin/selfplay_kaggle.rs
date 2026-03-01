@@ -1,5 +1,5 @@
 use burn::{
-    backend::{Autodiff, Wgpu},
+    backend::Autodiff,
     data::{
         dataloader::{DataLoaderBuilder, batcher::Batcher},
         dataset::Dataset,
@@ -11,6 +11,7 @@ use burn::{
     record::Recorder,
     train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
 };
+use burn_tch::{LibTorch, LibTorchDevice};
 use crossbeam_channel::Sender;
 use rand::Rng;
 use std::io::Write;
@@ -368,10 +369,10 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
 // ==========================================================
 
 fn main() {
-    type MyBackend = Wgpu;
+    type MyBackend = LibTorch<f32>;
     type MyAutodiffBackend = Autodiff<MyBackend>;
 
-    let device = burn::backend::wgpu::WgpuDevice::default();
+    let device = LibTorchDevice::Cuda(0);
     let config = XiangqiNetConfig::new();
 
     // CỐ GẮNG LOAD MODEL CŨ

@@ -8,6 +8,7 @@ macroquad = "0.4.14"
 burn = { version = "0.16", features = ["wgpu", "ndarray", "train"] }
 crossbeam-channel = "0.5"
 rand = "0.8"
+burn-tch = "0.16"
 
 [[bin]]
 name = "gui"
@@ -16,6 +17,10 @@ path = "src/bin/gui.rs"
 [[bin]]
 name = "selfplay"
 path = "src/bin/selfplay.rs"
+
+[[bin]]
+name = "selfplay_kaggle"
+path = "src/bin/selfplay_kaggle.rs"
 
 [[bin]]
 name = "train"
