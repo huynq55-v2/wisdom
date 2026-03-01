@@ -4,6 +4,8 @@ use burn::nn::{
     conv::{Conv2d, Conv2dConfig},
 };
 use burn::prelude::*;
+use burn::record::{FullPrecisionSettings, Recorder};
+use burn_import::pytorch::PyTorchFileRecorder;
 
 /// Total input planes: 7 piece types × 2 colors + 1 side-to-move = 15
 pub const NUM_PLANES: usize = 15;
@@ -144,20 +146,19 @@ impl XiangqiNetConfig {
         }
     }
 
-    /// Load model from a Burn NamedMpk record file.
+    /// Load model from a PyTorch record file.
     /// Usage: config.load_model::<B>("path/to/model", &device)
     pub fn load_model<B: Backend>(&self, path: &str, device: &B::Device) -> XiangqiNet<B> {
-        use burn::record::{NamedMpkFileRecorder, FullPrecisionSettings, Recorder};
-
-        println!("🧠 Đang nạp bộ não từ file: {} ...", path);
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
         let model = self.init::<B>(device);
-        let record = recorder
+
+        println!("🧠 Đang nạp Model PyTorch từ: {}.pt", path);
+        
+        // Đọc thẳng file PyTorch. Trên Linux sẽ mượt mà 100%.
+        let record = PyTorchFileRecorder::<FullPrecisionSettings>::default()
             .load(path.into(), device)
-            .expect("❌ Không thể đọc file model! Hãy kiểm tra lại đường dẫn.");
-        let model = model.load_record(record);
-        println!("✅ Nạp model thành công!");
-        model
+            .expect("LỖI: Không nạp được weights.");
+        
+        model.load_record(record)
     }
 }
 

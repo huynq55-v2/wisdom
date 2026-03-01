@@ -2,9 +2,8 @@ use crate::board::{Board, Color, Piece, PieceType};
 use crate::eval_queue::EvalQueue;
 use crate::mcts::MCTS;
 use crate::r#move::Move;
-use crate::search::alphabeta_search_best_move;
+
 use std::io::{self, BufRead};
-use std::sync::Arc;
 
 pub fn move_to_ucci_string(m: Move) -> String {
     let (from_row, from_col) = Board::square_to_coord(m.from_sq());

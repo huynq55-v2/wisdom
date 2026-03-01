@@ -13,11 +13,11 @@ pub struct AtomicMCTSNode {
     pub visits: AtomicU32,      // N - Visit count with Virtual Loss
     pub total_value: AtomicU64, // W - Điểm số DƯỚI GÓC NHÌN CỦA NODE NÀY
 
-    pub children_index: AtomicU32, 
+    pub children_index: AtomicU32,
     pub num_children: AtomicU32, // u32::MAX nghĩa là Đang Lock (Đang Expansion)
 
-    pub move_from_parent: AtomicU32, 
-    pub prior_prob: AtomicU32,       
+    pub move_from_parent: AtomicU32,
+    pub prior_prob: AtomicU32,
 }
 
 impl AtomicMCTSNode {
@@ -33,8 +33,10 @@ impl AtomicMCTSNode {
     }
 
     pub fn set_data(&self, move_val: u16, prior_prob: f32) {
-        self.move_from_parent.store(move_val as u32, Ordering::Release);
-        self.prior_prob.store(prior_prob.to_bits(), Ordering::Release);
+        self.move_from_parent
+            .store(move_val as u32, Ordering::Release);
+        self.prior_prob
+            .store(prior_prob.to_bits(), Ordering::Release);
     }
 
     pub fn get_prior_prob(&self) -> f32 {
@@ -111,15 +113,21 @@ impl MCTS {
     /// Helper: build a HistoryEntry for a move that was just made on `board`.
     /// `moving_side` is the side BEFORE make_move (the side that moved).
     /// `pre_threats` is the threat bitset computed BEFORE make_move.
-    fn make_history_entry(board: &mut Board, m: Move, moving_side: crate::board::Color, pre_threats: u128) -> HistoryEntry {
+    fn make_history_entry(
+        board: &mut Board,
+        m: Move,
+        moving_side: crate::board::Color,
+        pre_threats: u128,
+    ) -> HistoryEntry {
         let is_capture = m.is_capture();
         let piece = board.piece_at(m.to_sq()); // After make_move, piece is at to_sq
         let is_reversible = if let Some(p) = piece {
-            !is_capture && (p.piece_type != PieceType::Pawn || {
-                let (from_row, _) = Board::square_to_coord(m.from_sq());
-                let (to_row, _) = Board::square_to_coord(m.to_sq());
-                from_row == to_row
-            })
+            !is_capture
+                && (p.piece_type != PieceType::Pawn || {
+                    let (from_row, _) = Board::square_to_coord(m.from_sq());
+                    let (to_row, _) = Board::square_to_coord(m.to_sq());
+                    from_row == to_row
+                })
         } else {
             false
         };
@@ -174,12 +182,20 @@ impl MCTS {
         // Đánh giá Root bằng Mạng Neural
         let tensor = crate::nn::board_to_tensor(root_board);
         let (tx, rx) = crossbeam_channel::bounded(1);
-        eval_tx.send(EvalRequest { tensor_data: tensor, response_tx: tx, need_policy: true }).unwrap();
+        eval_tx
+            .send(EvalRequest {
+                tensor_data: tensor,
+                response_tx: tx,
+                need_policy: true,
+            })
+            .unwrap();
         let (_v, opt_p) = rx.recv().unwrap();
         let policy = opt_p.unwrap();
 
         if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
-            self.tree[0].children_index.store(start_idx, Ordering::Release);
+            self.tree[0]
+                .children_index
+                .store(start_idx, Ordering::Release);
             for (i, m) in legal_moves.iter().enumerate() {
                 let idx = start_idx as usize + i;
                 let nn_idx = move_to_index(*m);
@@ -190,7 +206,9 @@ impl MCTS {
                 self.tree[idx].num_children.store(0, Ordering::Release);
                 self.tree[idx].set_data(m.0, p);
             }
-            self.tree[0].num_children.store(legal_moves.len() as u32, Ordering::Release);
+            self.tree[0]
+                .num_children
+                .store(legal_moves.len() as u32, Ordering::Release);
         }
 
         // Khởi chạy Đa luồng (Tree Parallelism)
@@ -288,11 +306,12 @@ impl MCTS {
             let is_capture = m.is_capture();
             let piece_opt = board.piece_at(m.from_sq());
             let is_reversible_check = if let Some(p) = piece_opt {
-                !is_capture && (p.piece_type != PieceType::Pawn || {
-                    let (from_row, _) = Board::square_to_coord(m.from_sq());
-                    let (to_row, _) = Board::square_to_coord(m.to_sq());
-                    from_row == to_row
-                })
+                !is_capture
+                    && (p.piece_type != PieceType::Pawn || {
+                        let (from_row, _) = Board::square_to_coord(m.from_sq());
+                        let (to_row, _) = Board::square_to_coord(m.to_sq());
+                        from_row == to_row
+                    })
             } else {
                 false
             };
@@ -323,7 +342,7 @@ impl MCTS {
 
         // 2. EXPAND & EVALUATE
         let leaf_node = &self.tree[current_idx];
-        let mut value;
+        let value;
 
         // === REPETITION CHECK ===
         // Before evaluating with NN, check if current position is a repetition
@@ -386,11 +405,21 @@ impl MCTS {
             value = -1.0;
         } else {
             // FIX BUG 3: Dùng Spin-lock để ngăn đụng độ bộ nhớ đa luồng
-            if leaf_node.num_children.compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            if leaf_node
+                .num_children
+                .compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
                 // Ta đã khóa được Node! Gọi GPU đánh giá
                 let tensor = crate::nn::board_to_tensor(board);
                 let (tx, rx) = crossbeam_channel::bounded(1);
-                eval_tx.send(EvalRequest { tensor_data: tensor, response_tx: tx, need_policy: true }).unwrap();
+                eval_tx
+                    .send(EvalRequest {
+                        tensor_data: tensor,
+                        response_tx: tx,
+                        need_policy: true,
+                    })
+                    .unwrap();
 
                 let (v, opt_p) = rx.recv().unwrap();
                 value = v;
@@ -410,7 +439,9 @@ impl MCTS {
                         self.tree[idx].num_children.store(0, Ordering::Release);
                     }
                     // Mở khóa
-                    leaf_node.num_children.store(legal_moves.len() as u32, Ordering::Release);
+                    leaf_node
+                        .num_children
+                        .store(legal_moves.len() as u32, Ordering::Release);
                 }
             } else {
                 // Có một luồng khác đang mở rộng Node này. Ta Spin-wait.

@@ -1,6 +1,6 @@
 use crate::r#move::Move;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const FLAG_EXACT: u8 = 0;
 pub const FLAG_ALPHA: u8 = 1; // Upper bound

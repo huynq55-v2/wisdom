@@ -3,8 +3,8 @@ use macroquad::prelude::*;
 use wisdom::board::{Board, Color as PieceColor, HistoryEntry, PieceType, RepetitionResult};
 use wisdom::eval_queue::EvalQueue;
 use wisdom::mcts::MCTS;
-use wisdom::nn::XiangqiNetConfig;
 use wisdom::r#move::Move;
+use wisdom::nn::XiangqiNetConfig;
 use wisdom::tt::TranspositionTable;
 
 const SQUARE_SIZE: f32 = 60.0;
@@ -12,7 +12,7 @@ const OFFSET_X: f32 = 50.0;
 const OFFSET_Y: f32 = 50.0;
 const RADIUS: f32 = 25.0;
 
-const MODEL_PATH: &str = "xiangqi_net_weights";
+const MODEL_PATH: &str = "wisdom_model";
 
 #[derive(PartialEq)]
 enum GameMode {
@@ -71,6 +71,20 @@ fn apply_move_to_game(board: &mut Board, m: Move, history: &mut Vec<HistoryEntry
         chased_set,
         is_reversible,
     });
+}
+
+fn format_move(m: Move) -> String {
+    let (from_row, from_col) = Board::square_to_coord(m.from_sq());
+    let (to_row, to_col) = Board::square_to_coord(m.to_sq());
+
+    // Convert to UCCI format. Files a-i, Ranks 0-9 (from bottom to top).
+    // Our row 9 is bottom, so UCCI rank is 9 - row.
+    let from_file = (b'a' + from_col as u8) as char;
+    let from_rank = (b'0' + (9 - from_row) as u8) as char;
+    let to_file = (b'a' + to_col as u8) as char;
+    let to_rank = (b'0' + (9 - to_row) as u8) as char;
+
+    format!("{}{}{}{}", from_file, from_rank, to_file, to_rank)
 }
 
 fn draw_board() {
@@ -276,16 +290,21 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Chỉ ghi tên, KHÔNG GHI ĐUÔI
+    const MODEL_PATH: &str = "wisdom_model"; 
+
     // --- Initialize NN + MCTS Engine ---
     type B = NdArray<f32>;
     let device = NdArrayDevice::Cpu;
     let config = XiangqiNetConfig::new();
 
-    let model = if std::path::Path::new(&format!("{}.mpk", MODEL_PATH)).exists() {
-        println!("📦 GUI: Phát hiện file model đã huấn luyện!");
+    // Check file để in ra UI
+    let file_to_check = format!("{}.pt", MODEL_PATH);
+    let model = if std::path::Path::new(&file_to_check).exists() {
+        println!("📦 GUI: Phát hiện file {}, đang nạp...", file_to_check);
         config.load_model::<B>(MODEL_PATH, &device)
     } else {
-        println!("⚠️ GUI: Không tìm thấy model. Dùng model ngẫu nhiên.");
+        println!("⚠️ GUI: Không tìm thấy {}. Dùng model ngẫu nhiên.", file_to_check);
         config.init::<B>(&device)
     };
 
@@ -310,6 +329,7 @@ async fn main() {
     let mut human_color = PieceColor::Red;
     let mut mcts_simulations: usize = 800;
     let mut current_eval: Option<String> = Some("Ready".to_string());
+    let mut engine_policy: Vec<String> = Vec::new();
 
     loop {
         draw_board();
@@ -331,6 +351,7 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            engine_policy.clear();
         }
         py += 60.0;
 
@@ -354,6 +375,7 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            engine_policy.clear();
         }
         py += 40.0;
         if draw_button(
@@ -373,6 +395,7 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            engine_policy.clear();
         }
         py += 40.0;
 
@@ -442,13 +465,18 @@ async fn main() {
 
         // Eval Display (MCTS style)
         if let Some(ref eval_str) = current_eval {
-            draw_text(
-                eval_str,
-                panel_x,
-                py,
-                22.0,
-                DARKGREEN,
-            );
+            draw_text(eval_str, panel_x, py, 22.0, DARKGREEN);
+            py += 30.0;
+        }
+
+        // Draw Policy
+        if !engine_policy.is_empty() {
+            draw_text("Top Moves:", panel_x, py, 20.0, BLACK);
+            py += 25.0;
+            for line in &engine_policy {
+                draw_text(line, panel_x, py, 18.0, DARKGRAY);
+                py += 20.0;
+            }
         }
 
         if game_over {
@@ -586,16 +614,28 @@ async fn main() {
                     let elapsed = start.elapsed();
 
                     // Gather MCTS stats for display
-                    let root_start = mcts.tree[0].children_index.load(std::sync::atomic::Ordering::Acquire);
-                    let root_children = mcts.tree[0].num_children.load(std::sync::atomic::Ordering::Acquire);
-                    let root_visits = mcts.tree[0].visits.load(std::sync::atomic::Ordering::Acquire);
+                    let root_start = mcts.tree[0]
+                        .children_index
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let root_children = mcts.tree[0]
+                        .num_children
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let root_visits = mcts.tree[0]
+                        .visits
+                        .load(std::sync::atomic::Ordering::Acquire);
 
                     let mut best_child_visits = 0u32;
                     let mut best_child_q = 0.0f32;
+                    let mut children_stats: Vec<(Move, u32)> =
+                        Vec::with_capacity(root_children as usize);
+
                     for i in 0..root_children {
                         let idx = root_start as usize + i as usize;
                         let node = &mcts.tree[idx];
                         let nv = node.visits.load(std::sync::atomic::Ordering::Acquire);
+
+                        children_stats.push((Move(node.get_move()), nv));
+
                         if nv > best_child_visits {
                             best_child_visits = nv;
                             if nv > 0 {
@@ -604,11 +644,28 @@ async fn main() {
                         }
                     }
 
+                    children_stats.sort_by(|a, b| b.1.cmp(&a.1));
+                    engine_policy.clear();
+                    let total_visits = std::cmp::max(1, root_visits) as f32;
+                    for (i, &(mv, nv)) in children_stats.iter().take(5).enumerate() {
+                        if nv > 0 {
+                            let pct = (nv as f32 / total_visits) * 100.0;
+                            engine_policy.push(format!(
+                                "{}. {} ({:.1}%)",
+                                i + 1,
+                                format_move(mv),
+                                pct
+                            ));
+                        }
+                    }
+
                     // Display: Win% relative to the engine's side
                     let win_pct = ((best_child_q + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
                     current_eval = Some(format!(
                         "V:{} N:{} W:{:.0}% {:.1}s",
-                        root_visits, best_child_visits, win_pct,
+                        root_visits,
+                        best_child_visits,
+                        win_pct,
                         elapsed.as_secs_f32()
                     ));
 

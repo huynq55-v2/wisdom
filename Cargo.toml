@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 macroquad = "0.4.14"
 burn = { version = "0.16", features = ["wgpu", "ndarray", "train"] }
+burn-import = "0.16"
 crossbeam-channel = "0.5"
 rand = "0.8"
 burn-tch = "0.16"

@@ -1,4 +1,4 @@
-use crate::board::{Board, Color, Piece, PieceType};
+use crate::board::{Board, Color, PieceType};
 use crate::r#move::Move;
 
 /// Offsets for piece movement in the 16-width array
