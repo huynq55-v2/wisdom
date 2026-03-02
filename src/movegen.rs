@@ -234,6 +234,8 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    use crate::board::Piece;
+
     use super::*;
 
     #[test]
