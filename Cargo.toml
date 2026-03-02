@@ -31,6 +31,10 @@ name = "build_dataset"
 path = "src/bin/build_dataset.rs"
 
 [[bin]]
+name = "augment"
+path = "src/bin/augment.rs"
+
+[[bin]]
 name = "inspect"
 path = "src/bin/inspect.rs"
 
