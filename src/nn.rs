@@ -9,11 +9,11 @@ use burn::{
     record::NamedMpkFileRecorder,
 };
 
-/// Total input planes: 7 piece types × 2 colors + 1 side-to-move = 15
-pub const NUM_PLANES: usize = 15;
+/// Total input planes: 7 piece types × 2 colors = 14
+pub const NUM_PLANES: usize = 14;
 pub const BOARD_H: usize = 10;
 pub const BOARD_W: usize = 9;
-pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1350
+pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1260
 pub const ACTION_SPACE: usize = 90 * 90; // 8100
 
 // ============================================================
@@ -24,6 +24,28 @@ pub const ACTION_SPACE: usize = 90 * 90; // 8100
 pub fn move_to_index(m: crate::r#move::Move) -> usize {
     let from_sq = m.from_sq() as usize;
     let to_sq = m.to_sq() as usize;
+
+    let from_dense = (from_sq / 16) * 9 + (from_sq % 16);
+    let to_dense = (to_sq / 16) * 9 + (to_sq % 16);
+
+    from_dense * 90 + to_dense
+}
+
+/// Convert a Move to an Index (0..8099) for the Policy Head, mapped to Canonical Perspective
+pub fn move_to_index_perspective(m: crate::r#move::Move, stm: Color) -> usize {
+    let mut from_sq = m.from_sq() as usize;
+    let mut to_sq = m.to_sq() as usize;
+
+    // Nếu phe Đen đang đi, ta xoay tọa độ 180 độ để map đúng với Policy từ NN
+    if stm == Color::Black {
+        let f_row = from_sq / 16;
+        let f_col = from_sq % 16;
+        from_sq = (9 - f_row) * 16 + (8 - f_col);
+
+        let t_row = to_sq / 16;
+        let t_col = to_sq % 16;
+        to_sq = (9 - t_row) * 16 + (8 - t_col);
+    }
 
     let from_dense = (from_sq / 16) * 9 + (from_sq % 16);
     let to_dense = (to_sq / 16) * 9 + (to_sq % 16);
@@ -46,19 +68,20 @@ pub fn index_to_move(index: usize) -> (u8, u8) {
 // Board → Tensor Conversion
 // ============================================================
 
-/// Converts a Board to a flat f32 array of shape [15, 10, 9].
+/// Converts a Board to a flat f32 array of shape [14, 10, 9].
+/// Canonical Perspective mapping:
+/// If Red to move:
+///   Planes 0..=6   : Red pieces
+///   Planes 7..=13  : Black pieces
+///   Board mapped   : As is
 ///
-/// Plane layout:
-///   0: Red King       7: Black King
-///   1: Red Advisor    8: Black Advisor
-///   2: Red Elephant   9: Black Elephant
-///   3: Red Horse     10: Black Horse
-///   4: Red Rook      11: Black Rook
-///   5: Red Cannon    12: Black Cannon
-///   6: Red Pawn      13: Black Pawn
-///  14: Side-to-move (all 1.0 if Red to move, all 0.0 if Black)
+/// If Black to move:
+///   Planes 0..=6   : Black pieces
+///   Planes 7..=13  : Red pieces
+///   Board mapped   : Rotated 180 degrees (row -> 9 - row, col -> 8 - col)
 pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
     let mut data = [0.0f32; TENSOR_SIZE];
+    let is_black = board.side_to_move == Color::Black;
 
     for row in 0..BOARD_H {
         for col in 0..BOARD_W {
@@ -73,21 +96,25 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
                     PieceType::Cannon => 5,
                     PieceType::Pawn => 6,
                 };
-                let plane = match piece.color {
-                    Color::Red => piece_offset,
-                    Color::Black => piece_offset + 7,
+
+                // Canonical: Plane 0-6: Side to move, 7-13: Opponent
+                let is_mine = piece.color == board.side_to_move;
+                let plane = if is_mine {
+                    piece_offset
+                } else {
+                    piece_offset + 7
                 };
-                let idx = plane * (BOARD_H * BOARD_W) + row * BOARD_W + col;
+
+                // Rotate board 180 degrees if Black is to move
+                let (mapped_row, mapped_col) = if is_black {
+                    (9 - row, 8 - col)
+                } else {
+                    (row, col)
+                };
+
+                let idx = plane * (BOARD_H * BOARD_W) + mapped_row * BOARD_W + mapped_col;
                 data[idx] = 1.0;
             }
-        }
-    }
-
-    // Plane 14: side-to-move indicator
-    if board.side_to_move == Color::Red {
-        let base = 14 * (BOARD_H * BOARD_W);
-        for i in 0..(BOARD_H * BOARD_W) {
-            data[base + i] = 1.0;
         }
     }
 
@@ -216,18 +243,12 @@ mod tests {
         board.set_initial_position();
         let tensor = board_to_tensor(&board);
 
-        // Red Rook should be at (9, 0) and (9, 8) → plane 4
+        // Red Rook should be at (9, 0) and (9, 8) → plane 4 (it is Red's turn, so plane is 4)
         let plane_rook_red = 4;
         let idx_a0 = plane_rook_red * 90 + 9 * 9 + 0; // row=9, col=0
         let idx_i0 = plane_rook_red * 90 + 9 * 9 + 8; // row=9, col=8
         assert_eq!(tensor[idx_a0], 1.0, "Red Rook at a0");
         assert_eq!(tensor[idx_i0], 1.0, "Red Rook at i0");
-
-        // Side-to-move plane should be all 1s (Red to move)
-        let stm_base = 14 * 90;
-        for i in 0..90 {
-            assert_eq!(tensor[stm_base + i], 1.0, "STM plane[{}]", i);
-        }
     }
 
     #[test]

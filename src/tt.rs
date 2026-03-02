@@ -45,7 +45,9 @@ impl TranspositionTable {
 
         if entry.key.load(Ordering::Acquire) == key {
             let guard = entry.data.read();
-            return guard.as_ref().cloned();
+            if entry.key.load(Ordering::Acquire) == key {
+                return guard.as_ref().cloned();
+            }
         }
         None
     }

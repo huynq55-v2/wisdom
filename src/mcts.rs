@@ -1,18 +1,18 @@
 use crate::board::{Board, HistoryEntry, PieceType, RepetitionResult};
 use crate::eval_queue::EvalRequest;
 use crate::r#move::Move;
-use crate::nn::move_to_index;
+
 use crate::tt::TranspositionTable;
 use crossbeam_channel::Sender;
 use rand_distr::{Dirichlet, Distribution};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 pub const C_PUCT: f32 = 1.5;
 pub const VIRTUAL_LOSS: u32 = 1;
 
 pub struct AtomicMCTSNode {
     pub visits: AtomicU32,      // N - Visit count with Virtual Loss
-    pub total_value: AtomicU64, // W - Điểm số DƯỚI GÓC NHÌN CỦA NODE NÀY
+    pub total_value: AtomicI64, // W - Điểm số DƯỚI GÓC NHÌN CỦA NODE NÀY
 
     pub children_index: AtomicU32,
     pub num_children: AtomicU32, // u32::MAX nghĩa là Đang Lock (Đang Expansion)
@@ -25,7 +25,7 @@ impl AtomicMCTSNode {
     pub fn new() -> Self {
         Self {
             visits: AtomicU32::new(0),
-            total_value: AtomicU64::new(0),
+            total_value: AtomicI64::new(0),
             children_index: AtomicU32::new(0),
             num_children: AtomicU32::new(0),
             move_from_parent: AtomicU32::new(0),
@@ -50,25 +50,11 @@ impl AtomicMCTSNode {
 
     pub fn add_value(&self, val: f32) {
         let scaled = (val * 1_000_000.0) as i64;
-        let mut current = self.total_value.load(Ordering::Relaxed);
-        loop {
-            let current_i64 = current as i64;
-            let new_i64 = current_i64 + scaled;
-            let new_u64 = new_i64 as u64;
-            match self.total_value.compare_exchange_weak(
-                current,
-                new_u64,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(val) => current = val,
-            }
-        }
+        self.total_value.fetch_add(scaled, Ordering::AcqRel);
     }
 
     pub fn get_value(&self) -> f32 {
-        let current = self.total_value.load(Ordering::Relaxed) as i64;
+        let current = self.total_value.load(Ordering::Acquire);
         (current as f32) / 1_000_000.0
     }
 }
@@ -178,7 +164,7 @@ impl MCTS {
             // --- THÊM SOFTMAX OVER LEGAL MOVES ---
             let mut max_logit = -f32::MAX;
             for m in &legal_moves {
-                let nn_idx = move_to_index(*m);
+                let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
                 if policy[nn_idx] > max_logit {
                     max_logit = policy[nn_idx];
                 }
@@ -186,7 +172,7 @@ impl MCTS {
             let mut sum_exp = 0.0;
             let mut exps = Vec::with_capacity(legal_moves.len());
             for m in &legal_moves {
-                let nn_idx = move_to_index(*m);
+                let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
                 let exp = (policy[nn_idx] - max_logit).exp();
                 exps.push(exp);
                 sum_exp += exp;
@@ -304,7 +290,7 @@ impl MCTS {
 
             // Phạt Ảo (Virtual Loss)
             let node_visits = node.visits.fetch_add(VIRTUAL_LOSS, Ordering::AcqRel);
-            node.add_value(-1.0);
+            node.total_value.fetch_sub(1_000_000, Ordering::AcqRel);
 
             let num_children = node.num_children.load(Ordering::Acquire);
 
@@ -399,31 +385,34 @@ impl MCTS {
                     // Current side to move is perpetually chasing/checking → LOSE
                     value = -1.0;
                     // Skip expansion, go straight to backprop
-                    let mut current_val = -value;
+                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
                     for &idx in path.iter().rev() {
                         let node = &self.tree[idx];
-                        node.add_value(1.0 + current_val);
-                        current_val = -current_val;
+                        node.total_value
+                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                        current_val_i64 = -current_val_i64;
                     }
                     return;
                 }
                 RepetitionResult::Win => {
                     value = 1.0;
-                    let mut current_val = -value;
+                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
                     for &idx in path.iter().rev() {
                         let node = &self.tree[idx];
-                        node.add_value(1.0 + current_val);
-                        current_val = -current_val;
+                        node.total_value
+                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                        current_val_i64 = -current_val_i64;
                     }
                     return;
                 }
                 RepetitionResult::Draw => {
                     value = 0.0;
-                    let mut current_val = -value;
+                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
                     for &idx in path.iter().rev() {
                         let node = &self.tree[idx];
-                        node.add_value(1.0 + current_val);
-                        current_val = -current_val;
+                        node.total_value
+                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                        current_val_i64 = -current_val_i64;
                     }
                     return;
                 }
@@ -479,7 +468,7 @@ impl MCTS {
                     // --- THÊM SOFTMAX OVER LEGAL MOVES ---
                     let mut max_logit = -f32::MAX;
                     for m in &legal_moves {
-                        let nn_idx = move_to_index(*m);
+                        let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
                         if p[nn_idx] > max_logit {
                             max_logit = p[nn_idx];
                         }
@@ -487,7 +476,7 @@ impl MCTS {
                     let mut sum_exp = 0.0;
                     let mut exps = Vec::with_capacity(legal_moves.len());
                     for m in &legal_moves {
-                        let nn_idx = move_to_index(*m);
+                        let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
                         let exp = (p[nn_idx] - max_logit).exp();
                         exps.push(exp);
                         sum_exp += exp;
@@ -520,12 +509,13 @@ impl MCTS {
         }
 
         // 3. BACKPROPAGATION
-        let mut current_val = -value;
+        let mut current_val_i64 = (-value * 1_000_000.0) as i64;
 
         for &idx in path.iter().rev() {
             let node = &self.tree[idx];
-            node.add_value(1.0 + current_val);
-            current_val = -current_val;
+            node.total_value
+                .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+            current_val_i64 = -current_val_i64;
         }
     }
 }

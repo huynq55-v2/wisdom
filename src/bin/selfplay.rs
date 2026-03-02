@@ -207,7 +207,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
-    let mut result = GameResult::Draw;
+    let result;
 
     loop {
         let legal_moves = get_all_legal_moves(&mut board);

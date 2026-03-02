@@ -377,7 +377,7 @@ async fn main() {
 
     let mut is_engine_thinking = false;
 
-    let mut send_position_and_go =
+    let send_position_and_go =
         |moves: &[String], simulations: usize, stdin: &mut std::process::ChildStdin| {
             let mut cmd = "position startpos".to_string();
             if !moves.is_empty() {

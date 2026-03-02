@@ -2,34 +2,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import pandas as pd
 import numpy as np
 from safetensors.torch import save_file
 import time
 
 # =====================================================================
-# 1. HÀM CHUYỂN ĐỔI FEN SANG TENSOR (Đồng bộ 100% với file nn.rs)
+# 1. HÀM CHUYỂN ĐỔI FEN SANG TENSOR VỚI PERSPECTIVE FIX
 # =====================================================================
 def fen_to_tensor(fen_str):
-    """
-    Chuyển FEN string thành Tensor shape [15, 10, 9]
-    """
     parts = fen_str.split()
     board_part = parts[0]
-    stm = parts[1] if len(parts) > 1 else 'w' # 'w' là Đỏ, 'b' là Đen
+    stm = parts[1].lower() if len(parts) > 1 else 'w' 
 
-    # Khởi tạo mảng numpy 15 mặt phẳng, kích thước 10x9
-    tensor = np.zeros((15, 10, 9), dtype=np.float32)
-
-    # Map quân cờ với index mặt phẳng (0-6 cho Đỏ, 7-13 cho Đen)
+    tensor = np.zeros((14, 10, 9), dtype=np.float32)
     piece_map = {
-        'K': 0, 'A': 1, 'E': 2, 'H': 3, 'R': 4, 'C': 5, 'P': 6, # Đỏ (Viết hoa)
-        'k': 7, 'a': 8, 'e': 9, 'h': 10, 'r': 11, 'c': 12, 'p': 13 # Đen (Viết thường)
+        'K': 0, 'A': 1, 'E': 2, 'H': 3, 'R': 4, 'C': 5, 'P': 6,
+        'k': 7, 'a': 8, 'e': 9, 'h': 10, 'r': 11, 'c': 12, 'p': 13
     }
-
-    row = 0
-    col = 0
+    
+    # Render raw board first
+    raw_board = np.full((10, 9), -1, dtype=np.int32)
+    row, col = 0, 0
     for char in board_part:
         if char == '/':
             row += 1
@@ -37,23 +32,39 @@ def fen_to_tensor(fen_str):
         elif char.isdigit():
             col += int(char)
         elif char in piece_map:
-            plane = piece_map[char]
-            tensor[plane, row, col] = 1.0
+            raw_board[row, col] = piece_map[char]
             col += 1
 
-    # Mặt phẳng 14: Lượt đi. Nếu Đỏ đi thì toàn bộ là 1.0, Đen đi là 0.0
-    if stm.lower() == 'w':
-        tensor[14, :, :] = 1.0
+    # Map to tensor based on perspective
+    for r in range(10):
+        for c in range(9):
+            p = raw_board[r, c]
+            if p == -1: continue
+            
+            is_red = p <= 6
+            piece_type = p if is_red else p - 7
+            
+            if stm == 'w':
+                # Red to move: Red pieces on 0-6, Black on 7-13. No rotation.
+                plane = piece_type if is_red else piece_type + 7
+                tensor[plane, r, c] = 1.0
+            else:
+                # Black to move: Black pieces on 0-6, Red on 7-13. Rotate 180 degrees.
+                mirrored_r = 9 - r
+                mirrored_c = 8 - c
+                plane = piece_type if not is_red else piece_type + 7
+                tensor[plane, mirrored_r, mirrored_c] = 1.0
 
     return torch.from_numpy(tensor)
 
 # =====================================================================
-# 2. ĐỊNH NGHĨA DATASET ĐỌC TỪ CSV
+# 2. DATASET
 # =====================================================================
 class XiangqiDataset(Dataset):
     def __init__(self, csv_file):
         print(f"Đang nạp dữ liệu từ {csv_file}...")
         self.data = pd.read_csv(csv_file)
+        self.data['value'] = self.data['value'].astype(np.float32) + 0.0
         print(f"Đã nạp {len(self.data)} ván cờ.")
 
     def __len__(self):
@@ -61,146 +72,155 @@ class XiangqiDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        
-        # Lấy Input (FEN)
         fen = row['fen']
+        stm = fen.split()[1].lower() if len(fen.split()) > 1 else 'w'
+        
         board_tensor = fen_to_tensor(fen)
         
-        # Lấy Target Policy (0 - 8099)
+        # Policy Fix: If Black to move, mirror the recorded move policy as well!
         policy_idx = int(row['policy'])
-        
-        # Lấy Target Value (-1.0 đến 1.0)
+        if stm == 'b':
+            from_dense = policy_idx // 90
+            to_dense = policy_idx % 90
+            
+            from_r, from_c = from_dense // 9, from_dense % 9
+            to_r, to_c = to_dense // 9, to_dense % 9
+            
+            # Mirror
+            from_r, from_c = 9 - from_r, 8 - from_c
+            to_r, to_c = 9 - to_r, 8 - to_c
+            
+            mirrored_from = from_r * 9 + from_c
+            mirrored_to = to_r * 9 + to_c
+            
+            policy_idx = mirrored_from * 90 + mirrored_to
+            
         value = np.float32(row['value'])
-        
         return board_tensor, policy_idx, value
 
 # =====================================================================
-# 3. ĐỊNH NGHĨA MODEL NEURAL NETWORK
+# 3. MODEL RESNET
 # =====================================================================
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        out = F.relu(out)
+        return out
+
 class XiangqiNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_res_blocks=7, channels=128):
         super(XiangqiNet, self).__init__()
+        self.conv_input = nn.Conv2d(14, channels, kernel_size=3, padding=1, bias=False)
+        self.bn_input = nn.BatchNorm2d(channels)
+        self.res_blocks = nn.Sequential(*[ResBlock(channels) for _ in range(num_res_blocks)])
         
-        # --- Shared Convolutional Blocks ---
-        self.conv1 = nn.Conv2d(15, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.conv_policy = nn.Conv2d(channels, 2, kernel_size=1)
+        self.policy_head = nn.Linear(2 * 10 * 9, 8100)
         
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        
-        self.conv3 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        
-        # --- Policy Head Branch ---
-        self.conv_policy = nn.Conv2d(128, 2, kernel_size=1)
-        self.policy_head = nn.Linear(2 * 10 * 9, 8100) # 8100 là Action Space
-        
-        # --- Value Head Branch ---
-        self.fc1 = nn.Linear(128, 64)
+        self.fc1 = nn.Linear(channels, 64)
         self.value_head = nn.Linear(64, 1)
 
     def forward(self, x):
         batch_size = x.size(0)
+        x = F.relu(self.bn_input(self.conv_input(x)))
+        x_spatial = self.res_blocks(x)
         
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x_spatial = F.relu(self.bn3(self.conv3(x)))
-        
-        # Policy Forward
-        x_pol = self.conv_policy(x_spatial)
-        x_pol = x_pol.view(batch_size, -1) # Flatten thành [Batch, 180]
+        x_pol = self.conv_policy(x_spatial).view(batch_size, -1)
         logits_policy = self.policy_head(x_pol)
         
-        # Value Forward (Global Average Pooling)
-        x_val = x_spatial.view(batch_size, 128, -1).mean(dim=2) # Shape: [Batch, 128]
+        x_val = x_spatial.view(batch_size, 128, -1).mean(dim=2)
         x_val = F.relu(self.fc1(x_val))
         value = torch.tanh(self.value_head(x_val))
-        
         return value, logits_policy
 
 # =====================================================================
-# 4. HÀM TRAIN CHÍNH
+# 4. HÀM TRAIN & VALIDATION
 # =====================================================================
 def train_model():
-    # Cấu hình thiết bị (Ưu tiên GPU nếu có)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Đang sử dụng thiết bị: {device}")
 
-    # Hyperparameters
-    batch_size = 256
-    learning_rate = 1e-3
-    epochs = 10 # Bạn có thể tăng lên nếu loss vẫn đang giảm tốt
+    batch_size = 512
+    learning_rate = 5e-4
+    epochs = 10
 
-    # Khởi tạo Model, Dataset, DataLoader
+    full_dataset = XiangqiDataset("/kaggle/input/datasets/huyquang2309/xiangqi-mcts/xiangqi_dataset_augmented_1.csv")
+
+    val_size = int(0.05 * len(full_dataset))
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
     model = XiangqiNet().to(device)
-    dataset = XiangqiDataset("./xiangqi_dataset.csv") # Đường dẫn file CSV tạo từ Rust
-    
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=4, # Dùng đa luồng nạp data trên Kaggle (tùy chỉnh 2-4)
-        pin_memory=True if torch.cuda.is_available() else False
-    )
-
-    # Định nghĩa Hàm Mất Mát (Loss Functions) và Tối Ưu (Optimizer)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    mse_loss_fn = nn.MSELoss()             # Cho Value
-    ce_loss_fn = nn.CrossEntropyLoss()     # Cho Policy
+    mse_loss_fn = nn.MSELoss()
+    ce_loss_fn = nn.CrossEntropyLoss()
 
-    print("Bắt đầu huấn luyện...")
-    
     for epoch in range(epochs):
         model.train()
-        total_loss = 0.0
-        total_v_loss = 0.0
-        total_p_loss = 0.0
         start_time = time.time()
-        
-        for batch_idx, (boards, target_policies, target_values) in enumerate(dataloader):
-            boards = boards.to(device)
-            target_policies = target_policies.to(device)
-            target_values = target_values.to(device).unsqueeze(1) # Reshape [Batch] -> [Batch, 1]
+        for batch_idx, (boards, target_policies, target_values) in enumerate(train_loader):
+            boards, target_policies = boards.to(device), target_policies.to(device)
+            target_values = target_values.to(device).unsqueeze(1)
 
-            optimizer.zero_dict()
-
-            # Chạy qua mạng
+            optimizer.zero_grad()
             pred_values, pred_policies = model(boards)
-
-            # Tính Loss
+            
             loss_v = mse_loss_fn(pred_values, target_values)
             loss_p = ce_loss_fn(pred_policies, target_policies)
             loss = loss_v + loss_p
 
-            # Cập nhật trọng số
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
-            total_v_loss += loss_v.item()
-            total_p_loss += loss_p.item()
+            if (batch_idx + 1) % 500 == 0:
+                print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx+1}/{len(train_loader)}] | Loss: {loss.item():.4f}")
 
-            # Cứ mỗi 100 batch thì in ra log một lần
-            if (batch_idx + 1) % 100 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx+1}/{len(dataloader)}] | "
-                      f"Loss: {loss.item():.4f} (V_Loss: {loss_v.item():.4f}, P_Loss: {loss_p.item():.4f})")
+        model.eval()
+        val_loss_v, val_loss_p = 0, 0
+        correct_policy = 0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for boards, target_policies, target_values in val_loader:
+                boards, target_policies = boards.to(device), target_policies.to(device)
+                target_values = target_values.to(device).unsqueeze(1)
 
-        # Thống kê Epoch
-        avg_loss = total_loss / len(dataloader)
+                pred_values, pred_policies = model(boards)
+                
+                val_loss_v += mse_loss_fn(pred_values, target_values).item() * boards.size(0)
+                val_loss_p += ce_loss_fn(pred_policies, target_policies).item() * boards.size(0)
+                
+                _, predicted = torch.max(pred_policies, 1)
+                correct_policy += (predicted == target_policies).sum().item()
+                total_samples += boards.size(0)
+
+        avg_val_v = val_loss_v / total_samples
+        avg_val_p = val_loss_p / total_samples
+        accuracy = (correct_policy / total_samples) * 100
+        
         epoch_time = time.time() - start_time
-        print(f"==> KẾT THÚC EPOCH {epoch+1} | Avg Loss: {avg_loss:.4f} | Thời gian: {epoch_time:.2f}s\n")
+        print(f"==> KẾT THÚC EPOCH {epoch+1}")
+        print(f"Train Time: {epoch_time:.2f}s")
+        print(f"Val Value Loss: {avg_val_v:.4f} | Val Policy Loss: {avg_val_p:.4f}")
+        print(f"Policy Accuracy (Top-1): {accuracy:.2f}%")
+        print("-" * 50)
 
-    # =====================================================================
-    # 5. LƯU MODEL RA ĐỊNH DẠNG SAFETENSORS CHO RUST
-    # =====================================================================
-    output_path = "xiangqi_net_weights.safetensors"
-    
-    # Để an toàn cho Burn (Rust) đọc, ta thường đẩy mô hình về lại CPU trước khi lưu
-    model.eval()
     model.to("cpu")
-    
-    save_file(model.state_dict(), output_path)
-    print(f"🎉 Hoàn tất! Model đã được lưu thành công tại: {output_path}")
+    save_file(model.state_dict(), "xiangqi_net_weights.safetensors")
+    print("🎉 Hoàn tất! Đã lưu model.")
 
 if __name__ == "__main__":
     train_model()
