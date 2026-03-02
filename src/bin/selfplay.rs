@@ -7,7 +7,7 @@ use burn::{
     },
     module::AutodiffModule,
     nn::loss::{CrossEntropyLossConfig, MseLoss},
-    optim::AdamConfig,
+    optim::{AdamConfig, decay::WeightDecayConfig},
     prelude::*,
     record::Recorder,
     train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
@@ -255,59 +255,45 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             board.to_fen(),
             normalized_score,
             current_side,
-            wisdom::nn::move_to_index(best_move),
+            wisdom::nn::move_to_index_perspective(best_move, current_side),
         ));
 
-        // ==== ĐÃ XÓA BỎ LOGIC EPSILON-GREEDY RANDOM ====
         let chosen_move = best_move;
 
-        // ===== BUG FIX 1: Compute proper HistoryEntry =====
+        // ===== TỐI ƯU LOGIC LUẬT CỜ =====
+        // Rút gọn logic để tính HistoryEntry phục vụ luật Repetition cờ tướng
         let is_capture = board.piece_at(chosen_move.to_sq()).is_some();
+        let piece = board.piece_at(chosen_move.from_sq()).unwrap();
 
-        if is_capture {
-            // Captures are never reversible in repetition logic
-            board.make_move(chosen_move);
-            let gives_check = board.is_in_check(board.side_to_move);
-
-            history.push(HistoryEntry {
-                hash: board.zobrist_key, // <-- Lấy hash sau khi make_move
-                is_check: gives_check,
-                chased_set: 0,
-                is_reversible: false,
-            });
-        } else {
-            // Quiet move: compute is_reversible, pre_threats, chased_set
-            let piece = board.piece_at(chosen_move.from_sq()).unwrap();
-            let is_reversible = piece.piece_type != PieceType::Pawn || {
+        let is_reversible = !is_capture
+            && (piece.piece_type != PieceType::Pawn || {
                 let (from_row, _) = Board::square_to_coord(chosen_move.from_sq());
                 let (to_row, _) = Board::square_to_coord(chosen_move.to_sq());
                 from_row == to_row
-            };
-
-            let pre_threats = if is_reversible {
-                board.get_unprotected_threats(board.side_to_move)
-            } else {
-                0
-            };
-
-            board.make_move(chosen_move);
-
-            let gives_check = board.is_in_check(board.side_to_move);
-
-            let chased_set = if is_reversible && !gives_check {
-                let post_threats = board.get_unprotected_threats(board.side_to_move.opposite());
-                post_threats & !pre_threats
-            } else {
-                0
-            };
-
-            history.push(HistoryEntry {
-                hash: board.zobrist_key, // <-- Lấy hash sau khi make_move
-                is_check: gives_check,
-                chased_set,
-                is_reversible,
             });
-        }
+
+        let pre_threats = if is_reversible {
+            board.get_unprotected_threats(current_side)
+        } else {
+            0
+        };
+
+        board.make_move(chosen_move);
+        let gives_check = board.is_in_check(board.side_to_move);
+
+        let chased_set = if is_reversible && !gives_check {
+            let post_threats = board.get_unprotected_threats(current_side.opposite());
+            post_threats & !pre_threats
+        } else {
+            0
+        };
+
+        history.push(HistoryEntry {
+            hash: board.zobrist_key,
+            is_check: gives_check,
+            chased_set,
+            is_reversible,
+        });
 
         move_count += 1;
     }
@@ -403,7 +389,7 @@ fn main() {
 
     // Khởi tạo Replay Buffer lưu tối đa khoảng 100,000 positions
     let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
-    let max_buffer_size = 100_000;
+    let max_buffer_size = 500_000;
 
     for iteration in 1..=num_iterations {
         println!("============================================================");
@@ -500,7 +486,7 @@ fn main() {
             .num_workers(1)
             .build(RAMDataset { items: valid_data });
 
-        let optim = AdamConfig::new();
+        let optim = AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4)));
 
         // Lưu tạm Model
         model
