@@ -232,7 +232,8 @@ impl MCTS {
                 best_child_visits = v;
                 best_move = Move(node.get_move());
                 if v > 0 {
-                    best_child_q = -node.get_value() / v as f32;
+                    // ĐÃ SỬA: Bỏ dấu '-' để in Win% đúng với phe của Engine
+                    best_child_q = node.get_value() / v as f32;
                 }
             }
         }
