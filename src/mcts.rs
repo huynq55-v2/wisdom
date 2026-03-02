@@ -4,6 +4,7 @@ use crate::r#move::Move;
 use crate::nn::move_to_index;
 use crate::tt::TranspositionTable;
 use crossbeam_channel::Sender;
+use rand_distr::{Dirichlet, Distribution};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const C_PUCT: f32 = 1.5;
@@ -124,6 +125,7 @@ impl MCTS {
         eval_tx: &Sender<EvalRequest>,
         _tt: &TranspositionTable,
         num_threads: usize,
+        add_noise: bool,
     ) -> (Move, SearchMetrics) {
         // Reset cây về trạng thái ban đầu
         self.tree[0].visits.store(0, Ordering::Release);
@@ -183,9 +185,28 @@ impl MCTS {
             }
             // -------------------------------------
 
+            // Gán xác suất chuẩn
+            let mut priors: Vec<f32> = exps.into_iter().map(|exp| exp / sum_exp).collect();
+
+            // --- THÊM DIRICHLET NOISE CHO SELF-PLAY ---
+            // AlphaZero dùng alpha = 0.3 cho Cờ vua (nhánh ~30), Cờ tướng nhánh ~40 dùng 0.3 là đẹp.
+            // Epsilon = 0.25 (25% tò mò, 75% nghe theo Mạng Neural)
+            if add_noise && legal_moves.len() > 1 {
+                let alpha = vec![0.3; legal_moves.len()];
+                if let Ok(dirichlet) = Dirichlet::new(&alpha) {
+                    let mut rng = rand::thread_rng();
+                    let noise = dirichlet.sample(&mut rng);
+                    let epsilon = 0.25;
+                    for i in 0..legal_moves.len() {
+                        priors[i] = (1.0 - epsilon) * priors[i] + epsilon * (noise[i] as f32);
+                    }
+                }
+            }
+            // ------------------------------------------
+
             for (i, m) in legal_moves.iter().enumerate() {
                 let idx = start_idx as usize + i;
-                let p = exps[i] / sum_exp; // Gán Xác suất chuẩn [0, 1] thay vì Logit thô
+                let p = priors[i]; // Gán Priors đã được bơm nhiễu
 
                 self.tree[idx].visits.store(0, Ordering::Release);
                 self.tree[idx].total_value.store(0, Ordering::Release);

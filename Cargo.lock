@@ -5501,6 +5501,7 @@ dependencies = [
  "crossbeam-channel",
  "macroquad",
  "rand 0.8.5",
+ "rand_distr 0.4.3",
  "safetensors 0.4.5",
  "serde_json",
  "walkdir",

@@ -9,6 +9,7 @@ burn = { version = "0.16", features = ["wgpu", "ndarray", "train"] }
 burn-import = "0.16"
 crossbeam-channel = "0.5"
 rand = "0.8"
+rand_distr = "0.4"
 burn-tch = "0.16"
 walkdir = "2.5.0"
 safetensors = "0.4"

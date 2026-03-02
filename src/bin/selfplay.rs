@@ -1,3 +1,4 @@
+use burn::record::NamedMpkFileRecorder;
 use burn::{
     backend::{Autodiff, Wgpu},
     data::{
@@ -12,14 +13,13 @@ use burn::{
     train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
 };
 use crossbeam_channel::Sender;
-use rand::Rng;
 use std::io::Write;
 use std::sync::Mutex;
 use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
+use wisdom::mcts::MCTS;
 use wisdom::nn::board_to_tensor;
 use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig};
-use wisdom::search::{MATE_VALUE, alphabeta_search_best_move_parallel};
 use wisdom::tt::TranspositionTable;
 
 // ==========================================================
@@ -203,7 +203,6 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     board.set_initial_position();
     let tt = TranspositionTable::new(32);
     let mut history = Vec::new();
-    let mut rng = rand::thread_rng();
 
     // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
@@ -240,17 +239,16 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             _ => {}
         }
 
-        // 1. Giảm Depth xuống 2 trong những Iteration đầu tiên!
-        // (Khi nào NN có Policy Head để Move Ordering, bạn mới nên nâng lên 3 hoặc 4)
-        let depth = 2;
+        // Khởi tạo MCTS (Cây nhỏ 5000 node là đủ cho Self-play)
+        let mcts = MCTS::new(5_000);
 
-        // 2. Tắt Lazy SMP bằng cách truyền num_threads = 1
-        // 32 ván cờ x 1 luồng = 32 luồng. Quá hoàn hảo để nhét đầy Batch Size của GPU!
-        let (best_move, score) =
-            alphabeta_search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
+        // Chạy MCTS với 400 simulations và BẬT DIRICHLET NOISE (true)
+        let simulations = 400;
+        let (best_move, metrics) =
+            mcts.search_best_move(&board, simulations, eval_tx, &tt, 1, true);
 
-        // Store FEN with the search score (will be overridden by ground truth later)
-        let normalized_score = (score as f32 / 10000.0).clamp(-1.0, 1.0);
+        // Quy đổi win_pct [0..100] về dải [-1.0 .. 1.0] làm Search Value
+        let normalized_score = (metrics.win_pct / 50.0) - 1.0;
         let current_side = board.side_to_move;
 
         game_records.push((
@@ -260,14 +258,8 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             wisdom::nn::move_to_index(best_move),
         ));
 
-        // 2. Epsilon-greedy: Choose move
-        let mut chosen_move = best_move;
-        let is_mate = score > MATE_VALUE - 100 || score < -MATE_VALUE + 100;
-
-        if !is_mate && rng.gen_bool(0.10) {
-            let random_idx = rng.gen_range(0..legal_moves.len());
-            chosen_move = legal_moves[random_idx];
-        }
+        // ==== ĐÃ XÓA BỎ LOGIC EPSILON-GREEDY RANDOM ====
+        let chosen_move = best_move;
 
         // ===== BUG FIX 1: Compute proper HistoryEntry =====
         let is_capture = board.piece_at(chosen_move.to_sq()).is_some();
@@ -407,7 +399,7 @@ fn main() {
     // 3. TỐI ƯU SỐ LUỒNG CHO CPU
     // Kaggle có khoảng 30 cores CPU. Đặt concurrent_games = 32 là lý tưởng nhất.
     // Nếu để 128 như trước, các thread sẽ tranh giành CPU gây ra hiệu ứng Context Switch cực kỳ chậm.
-    let concurrent_games = 32;
+    let concurrent_games = 64; // GPU Iris Xe: tạo đủ áp lực nhồi đầy Batch Size 64
 
     // Khởi tạo Replay Buffer lưu tối đa khoảng 100,000 positions
     let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
@@ -425,7 +417,7 @@ fn main() {
 
         // GENERATION PHASE
         // batch_size của CPU có thể để nhỏ (ví dụ 16 hoặc 32) để giảm đỗ trễ
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1);
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // Batch 64 cho GPU
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -541,7 +533,20 @@ fn main() {
             .save_file(&checkpoint_path, &burn::record::CompactRecorder::new())
             .expect("Failed to save model");
 
-        println!("Iteration {} completed. Model checkpointed.", iteration);
+        // 5. LƯU MODEL DƯỚI DẠNG NATIVE MPK CHO ENGINE/GUI
+        let final_mpk_path = format!("{}/xiangqi_net_weights", model_dir);
+        model
+            .clone()
+            .save_file(
+                &final_mpk_path,
+                &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
+            )
+            .expect("Failed to save mpk model");
+
+        println!(
+            "Iteration {} completed. Model saved to {}.mpk",
+            iteration, final_mpk_path
+        );
     }
 
     println!("Unified Pipeline completely finished.");
