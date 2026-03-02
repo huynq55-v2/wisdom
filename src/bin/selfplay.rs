@@ -19,7 +19,7 @@ use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::nn::board_to_tensor;
 use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig};
-use wisdom::search::{MATE_VALUE, alphabeta_search_best_move_parallel};
+use wisdom::search::{MATE_VALUE, search_best_move_parallel};
 use wisdom::tt::TranspositionTable;
 
 // ==========================================================
@@ -242,12 +242,12 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
 
         // 1. Giảm Depth xuống 2 trong những Iteration đầu tiên!
         // (Khi nào NN có Policy Head để Move Ordering, bạn mới nên nâng lên 3 hoặc 4)
-        let depth = 3;
+        let depth = 2;
 
         // 2. Tắt Lazy SMP bằng cách truyền num_threads = 1
         // 32 ván cờ x 1 luồng = 32 luồng. Quá hoàn hảo để nhét đầy Batch Size của GPU!
         let (best_move, score) =
-            alphabeta_search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
+            search_best_move_parallel(&board, depth, &tt, &history, eval_tx, 1);
 
         // Store FEN with the search score (will be overridden by ground truth later)
         let normalized_score = (score as f32 / 10000.0).clamp(-1.0, 1.0);
@@ -374,9 +374,16 @@ fn main() {
     let device = burn::backend::wgpu::WgpuDevice::default();
     let config = XiangqiNetConfig::new();
 
+    // 2. SỬA BUG ĐƯỜNG DẪN: Lưu tất cả vào thư mục cục bộ thay vì /tmp
+    let model_dir = "./wisdom_models";
+    std::fs::create_dir_all(model_dir).expect("Failed to create models directory");
+
+    let checkpoint_path = format!("{}/xiangqi_net_latest", model_dir);
+    let temp_transfer_path = format!("{}/temp_transfer", model_dir);
+
     // CỐ GẮNG LOAD MODEL CŨ
-    let checkpoint_path = "./xiangqi_net_latest";
-    let record_result = burn::record::CompactRecorder::new().load(checkpoint_path.into(), &device);
+    let record_result =
+        burn::record::CompactRecorder::new().load(checkpoint_path.clone().into(), &device);
 
     let mut model = match record_result {
         Ok(record) => {
@@ -396,7 +403,11 @@ fn main() {
 
     let num_iterations = 50;
     let games_per_iteration = 100;
-    let concurrent_games = 128; // <-- TĂNG LÊN ĐỂ GPU LUÔN BỊ LÀM ĐẦY BATCH SIZE
+
+    // 3. TỐI ƯU SỐ LUỒNG CHO CPU
+    // Kaggle có khoảng 30 cores CPU. Đặt concurrent_games = 32 là lý tưởng nhất.
+    // Nếu để 128 như trước, các thread sẽ tranh giành CPU gây ra hiệu ứng Context Switch cực kỳ chậm.
+    let concurrent_games = 32;
 
     // Khởi tạo Replay Buffer lưu tối đa khoảng 100,000 positions
     let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
@@ -405,18 +416,18 @@ fn main() {
     for iteration in 1..=num_iterations {
         println!("============================================================");
         println!(
-            " Iteration {} / {} - Generating Data",
+            " Iteration {} / {} - Generating Data (CPU Mode)",
             iteration, num_iterations
         );
         println!("============================================================");
 
         let iteration_data = Mutex::new(Vec::new());
 
-        // 1. GENERATION PHASE
+        // GENERATION PHASE
+        // batch_size của CPU có thể để nhỏ (ví dụ 16 hoặc 32) để giảm đỗ trễ
         let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1);
         let eval_tx = eval_queue.tx.clone();
 
-        // BUG FIX 4: Run games in parallel batches of `concurrent_games`
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
 
         for batch_idx in 0..total_batches {
@@ -427,14 +438,16 @@ fn main() {
 
             let start_game = batch_idx * concurrent_games + 1;
             println!(
-                "  Batch {}/{}: games {}-{}...",
+                "  Batch {}/{}: games {}-{}... (Spawning {} CPU threads)",
                 batch_idx + 1,
                 total_batches,
                 start_game,
-                start_game + games_in_batch - 1
+                start_game + games_in_batch - 1,
+                games_in_batch
             );
             std::io::stdout().flush().unwrap();
 
+            // Nhờ std::thread::scope, hàm này đã tự động chạy song song N ván cờ trên N nhân CPU!
             std::thread::scope(|s| {
                 for game_i in 0..games_in_batch {
                     let tx = &eval_tx;
@@ -451,23 +464,19 @@ fn main() {
             println!();
         }
 
-        // Destroy the eval queue thread to free the GPU for Burn's Learner
         drop(eval_tx);
         drop(eval_queue);
-        std::thread::sleep(std::time::Duration::from_millis(1000)); // <-- Tăng lên 1 giây để VRAM GPU kịp giải phóng hết rác của 15.000 ván cờ
+        std::thread::sleep(std::time::Duration::from_millis(1000));
 
         let mut iteration_data = iteration_data.into_inner().unwrap();
-
-        // THÊM DATA MỚI VÀO REPLAY BUFFER
         replay_buffer.append(&mut iteration_data);
 
-        // NẾU TRÀN BUFFER, XÓA BỚT DATA CŨ NHẤT (Giữ lại các ván cờ chất lượng/mới)
         if replay_buffer.len() > max_buffer_size {
             let excess = replay_buffer.len() - max_buffer_size;
             replay_buffer.drain(0..excess);
         }
 
-        // 2. TRAINING PHASE
+        // TRAINING PHASE
         println!("============================================================");
         println!(
             " Iteration {} / {} - Training Model on {} positions (Replay Buffer)",
@@ -488,37 +497,35 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(32) // <-- GIẢM TỪ 256 XUỐNG 32 ĐỂ CỨU GPU
+            .batch_size(32)
             .shuffle(42)
-            .num_workers(1) // <-- GIẢM SỐ LUỒNG XUỐNG 1 ĐỂ TRÁNH NGẼN RAM CỤC BỘ
+            .num_workers(1)
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-            .batch_size(32) // <-- GIẢM TỪ 256 XUỐNG 32
+            .batch_size(32)
             .shuffle(42)
             .num_workers(1)
             .build(RAMDataset { items: valid_data });
 
         let optim = AdamConfig::new();
 
-        // Convert Wgpu model to Autodiff<Wgpu> for training module via File Save/Load
+        // Lưu tạm Model
         model
             .clone()
-            .save_file(
-                "/tmp/wisdom_models/temp_transfer",
-                &burn::record::CompactRecorder::new(),
-            )
+            .save_file(&temp_transfer_path, &burn::record::CompactRecorder::new())
             .expect("Failed to save temp transfer model");
 
         let record = burn::record::CompactRecorder::new()
-            .load("/tmp/wisdom_models/temp_transfer".into(), &device)
+            .load(temp_transfer_path.clone().into(), &device)
             .expect("Failed to load temp transfer model");
 
         let autodiff_model = config
             .init::<MyAutodiffBackend>(&device)
             .load_record(record);
 
-        let learner = LearnerBuilder::new("/tmp/wisdom_models")
+        // Đổi đường dẫn Learner về model_dir
+        let learner = LearnerBuilder::new(model_dir)
             .with_file_checkpointer(burn::record::CompactRecorder::new())
             .devices(vec![device.clone()])
             .num_epochs(1)
@@ -528,13 +535,10 @@ fn main() {
 
         model = trained_autodiff_model.valid();
 
-        // 3. CHECKPOINTING
+        // 4. CHECKPOINTING CHUẨN ĐƯỜNG DẪN
         model
             .clone()
-            .save_file(
-                "/tmp/wisdom_models/xiangqi_net_latest",
-                &burn::record::CompactRecorder::new(),
-            )
+            .save_file(&checkpoint_path, &burn::record::CompactRecorder::new())
             .expect("Failed to save model");
 
         println!("Iteration {} completed. Model checkpointed.", iteration);
