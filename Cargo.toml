@@ -14,6 +14,7 @@ burn-tch = "0.16"
 walkdir = "2.5.0"
 safetensors = "0.4"
 serde_json = "1.0"
+parking_lot = "0.12.5"
 
 [[bin]]
 name = "gui"
@@ -23,13 +24,7 @@ path = "src/bin/gui.rs"
 name = "selfplay"
 path = "src/bin/selfplay.rs"
 
-[[bin]]
-name = "selfplay_kaggle"
-path = "src/bin/selfplay_kaggle.rs"
 
-[[bin]]
-name = "train"
-path = "src/bin/train.rs"
 
 [[bin]]
 name = "build_dataset"

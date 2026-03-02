@@ -1,37 +1,47 @@
 pub struct Zobrist {
-    pub keys: [[u64; 256]; 14],
+    pub pieces: [[[u64; 90]; 7]; 2], // [Màu][Loại quân][Vị trí 0-89]
     pub side: u64,
 }
 
-const fn pcg32_random_r(state: &mut u64, inc: u64) -> u32 {
+const fn pcg32(state: &mut u64) -> u64 {
     let oldstate = *state;
-    *state = oldstate.wrapping_mul(6364136223846793005).wrapping_add(inc | 1);
+    *state = oldstate
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let xorshifted = (((oldstate >> 18) ^ oldstate) >> 27) as u32;
     let rot = (oldstate >> 59) as u32;
-    (xorshifted >> rot) | (xorshifted.wrapping_shl((rot.wrapping_neg()) & 31))
-}
+    let v1 = (xorshifted >> rot) | (xorshifted << ((rot.wrapping_neg()) & 31));
 
-const fn next_u64(state: &mut u64) -> u64 {
-    let v1 = pcg32_random_r(state, 1442695040888963407) as u64;
-    let v2 = pcg32_random_r(state, 1442695040888963407) as u64;
-    (v1 << 32) | v2
+    // Gọi tiếp lần 2 để tạo 64-bit
+    let oldstate = *state;
+    *state = oldstate
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let xorshifted = (((oldstate >> 18) ^ oldstate) >> 27) as u32;
+    let rot = (oldstate >> 59) as u32;
+    let v2 = (xorshifted >> rot) | (xorshifted << ((rot.wrapping_neg()) & 31));
+
+    ((v1 as u64) << 32) | (v2 as u64)
 }
 
 pub const ZOBRIST: Zobrist = {
-    let mut state = 1234567890123456789;
-    let mut keys = [[0; 256]; 14];
-    
-    let mut i = 0;
-    while i < 14 {
-        let mut j = 0;
-        while j < 256 {
-            keys[i][j] = next_u64(&mut state);
-            j += 1;
+    let mut state = 1234567890123456789u64;
+    let mut pieces = [[[0u64; 90]; 7]; 2];
+
+    let mut color = 0;
+    while color < 2 {
+        let mut p_type = 0;
+        while p_type < 7 {
+            let mut sq = 0;
+            while sq < 90 {
+                pieces[color][p_type][sq] = pcg32(&mut state);
+                sq += 1;
+            }
+            p_type += 1;
         }
-        i += 1;
+        color += 1;
     }
-    
-    let side = next_u64(&mut state);
-    
-    Zobrist { keys, side }
+
+    let side = pcg32(&mut state);
+    Zobrist { pieces, side }
 };

@@ -149,18 +149,26 @@ impl MCTS {
             }
         }
 
-        // Đánh giá Root bằng Mạng Neural
-        let tensor = crate::nn::board_to_tensor(root_board);
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        eval_tx
-            .send(EvalRequest {
-                tensor_data: tensor,
-                response_tx: tx,
-                need_policy: true,
-            })
-            .unwrap();
-        let (_v, opt_p) = rx.recv().unwrap();
-        let policy = opt_p.unwrap();
+        // Đánh giá Root: Thử lấy từ TT trước, nếu trượt mới gọi NN
+        let (policy, _v) = if let Some(tt_data) = _tt.probe(root_board.zobrist_key) {
+            (tt_data.policy.clone(), tt_data.value)
+        } else {
+            let tensor = crate::nn::board_to_tensor(root_board);
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            eval_tx
+                .send(EvalRequest {
+                    tensor_data: tensor,
+                    response_tx: tx,
+                    need_policy: true,
+                })
+                .unwrap();
+            let (val, opt_p) = rx.recv().unwrap();
+            let pol = opt_p.unwrap();
+
+            // Lưu vào TT
+            _tt.record(root_board.zobrist_key, val, pol.clone());
+            (pol, val)
+        };
 
         if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
             self.tree[0]

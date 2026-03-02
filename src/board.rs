@@ -74,8 +74,15 @@ impl Piece {
         Self { piece_type, color }
     }
 
-    pub const fn zobrist_index(&self) -> usize {
-        let base = match self.piece_type {
+    pub const fn zobrist_color_index(&self) -> usize {
+        match self.color {
+            Color::Red => 0,
+            Color::Black => 1,
+        }
+    }
+
+    pub const fn zobrist_type_index(&self) -> usize {
+        match self.piece_type {
             PieceType::Pawn => 0,
             PieceType::Advisor => 1,
             PieceType::Elephant => 2,
@@ -83,11 +90,6 @@ impl Piece {
             PieceType::Cannon => 4,
             PieceType::Rook => 5,
             PieceType::King => 6,
-        };
-        if matches!(self.color, Color::Black) {
-            base + 7
-        } else {
-            base
         }
     }
 }
@@ -129,7 +131,9 @@ impl Board {
         let mut key = 0;
         for sq in 0..256 {
             if let Some(piece) = self.piece_at(sq) {
-                key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][sq];
+                let dense_sq = Self::square_to_dense(sq);
+                key ^= crate::zobrist::ZOBRIST.pieces[piece.zobrist_color_index()]
+                    [piece.zobrist_type_index()][dense_sq];
             }
         }
         if self.side_to_move == Color::Black {
@@ -556,13 +560,19 @@ impl Board {
             previous_zobrist_key: self.zobrist_key,
         };
 
+        let from_dense = Self::square_to_dense(from);
+        let to_dense = Self::square_to_dense(to);
+
         // Remove moving piece from 'from' and add it to 'to' in the hash
-        self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][from];
-        self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[piece.zobrist_index()][to];
+        self.zobrist_key ^= crate::zobrist::ZOBRIST.pieces[piece.zobrist_color_index()]
+            [piece.zobrist_type_index()][from_dense];
+        self.zobrist_key ^= crate::zobrist::ZOBRIST.pieces[piece.zobrist_color_index()]
+            [piece.zobrist_type_index()][to_dense];
 
         // Remove captured piece from the hash
         if let Some(cap) = captured {
-            self.zobrist_key ^= crate::zobrist::ZOBRIST.keys[cap.zobrist_index()][to];
+            self.zobrist_key ^= crate::zobrist::ZOBRIST.pieces[cap.zobrist_color_index()]
+                [cap.zobrist_type_index()][to_dense];
         }
 
         // Move piece
