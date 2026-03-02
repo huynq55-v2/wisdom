@@ -1,11 +1,13 @@
 use crate::board::{Board, Color, PieceType};
-use burn::nn::{
-    BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
-    conv::{Conv2d, Conv2dConfig},
-};
 use burn::prelude::*;
 use burn::record::{FullPrecisionSettings, Recorder};
-use burn_import::pytorch::PyTorchFileRecorder;
+use burn::{
+    nn::{
+        BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
+        conv::{Conv2d, Conv2dConfig},
+    },
+    record::NamedMpkFileRecorder,
+};
 
 /// Total input planes: 7 piece types × 2 colors + 1 side-to-move = 15
 pub const NUM_PLANES: usize = 15;
@@ -151,13 +153,14 @@ impl XiangqiNetConfig {
     pub fn load_model<B: Backend>(&self, path: &str, device: &B::Device) -> XiangqiNet<B> {
         let model = self.init::<B>(device);
 
-        println!("🧠 Đang nạp Model PyTorch từ: {}.pt", path);
-        
-        // Đọc thẳng file PyTorch. Trên Linux sẽ mượt mà 100%.
-        let record = PyTorchFileRecorder::<FullPrecisionSettings>::default()
-            .load(path.into(), device)
-            .expect("LỖI: Không nạp được weights.");
-        
+        let full_path = format!("{}.mpk", path);
+        println!("🧠 Đang nạp bộ não Native Mpk từ: {}", full_path);
+
+        // Đọc trực tiếp định dạng nhị phân Native của Burn, tốc độ bàn thờ!
+        let record = NamedMpkFileRecorder::<FullPrecisionSettings>::default()
+            .load(full_path.into(), device)
+            .expect("LỖI: Không nạp được file .mpk.");
+
         model.load_record(record)
     }
 }

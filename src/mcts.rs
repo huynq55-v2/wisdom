@@ -78,6 +78,13 @@ pub struct MCTS {
     pub max_nodes: usize,
 }
 
+pub struct SearchMetrics {
+    pub root_visits: u32,
+    pub best_child_visits: u32,
+    pub win_pct: f32,
+    pub top_moves: Vec<(Move, u32, f32)>, // Move, visits, percentage
+}
+
 impl MCTS {
     pub fn new(max_nodes: usize) -> Self {
         let mut tree = Vec::with_capacity(max_nodes);
@@ -110,45 +117,6 @@ impl MCTS {
         }
     }
 
-    /// Helper: build a HistoryEntry for a move that was just made on `board`.
-    /// `moving_side` is the side BEFORE make_move (the side that moved).
-    /// `pre_threats` is the threat bitset computed BEFORE make_move.
-    fn make_history_entry(
-        board: &mut Board,
-        m: Move,
-        moving_side: crate::board::Color,
-        pre_threats: u128,
-    ) -> HistoryEntry {
-        let is_capture = m.is_capture();
-        let piece = board.piece_at(m.to_sq()); // After make_move, piece is at to_sq
-        let is_reversible = if let Some(p) = piece {
-            !is_capture
-                && (p.piece_type != PieceType::Pawn || {
-                    let (from_row, _) = Board::square_to_coord(m.from_sq());
-                    let (to_row, _) = Board::square_to_coord(m.to_sq());
-                    from_row == to_row
-                })
-        } else {
-            false
-        };
-
-        let gives_check = board.is_in_check(board.side_to_move);
-
-        let chased_set = if is_reversible && !gives_check {
-            let post_threats = board.get_unprotected_threats(moving_side);
-            post_threats & !pre_threats
-        } else {
-            0
-        };
-
-        HistoryEntry {
-            hash: board.zobrist_key,
-            is_check: gives_check,
-            chased_set,
-            is_reversible,
-        }
-    }
-
     pub fn search_best_move(
         &self,
         root_board: &Board,
@@ -156,7 +124,7 @@ impl MCTS {
         eval_tx: &Sender<EvalRequest>,
         _tt: &TranspositionTable,
         num_threads: usize,
-    ) -> Move {
+    ) -> (Move, SearchMetrics) {
         // Reset cây về trạng thái ban đầu
         self.tree[0].visits.store(0, Ordering::Release);
         self.tree[0].total_value.store(0, Ordering::Release);
@@ -225,22 +193,52 @@ impl MCTS {
         });
 
         // Chọn nước đi có số lần duyệt (Visits) cao nhất
+        let root_visits = self.tree[0].visits.load(Ordering::Acquire);
         let mut best_move = Move(0);
-        let mut max_visits = 0;
+        let mut best_child_visits = 0;
+        let mut best_child_q = 0.0f32;
         let start_idx = self.tree[0].children_index.load(Ordering::Acquire);
         let num_children = self.tree[0].num_children.load(Ordering::Acquire);
+
+        let mut children_stats: Vec<(Move, u32)> = Vec::with_capacity(num_children as usize);
 
         for i in 0..num_children {
             let idx = start_idx as usize + i as usize;
             let node = &self.tree[idx];
             let v = node.visits.load(Ordering::Acquire);
-            if v > max_visits {
-                max_visits = v;
+
+            children_stats.push((Move(node.get_move()), v));
+
+            if v > best_child_visits {
+                best_child_visits = v;
                 best_move = Move(node.get_move());
+                if v > 0 {
+                    best_child_q = -node.get_value() / v as f32;
+                }
             }
         }
 
-        best_move
+        children_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut top_moves = Vec::new();
+        let total_visits_f32 = std::cmp::max(1, root_visits) as f32;
+        for &(mv, nv) in children_stats.iter().take(5) {
+            if nv > 0 {
+                let pct = (nv as f32 / total_visits_f32) * 100.0;
+                top_moves.push((mv, nv, pct));
+            }
+        }
+
+        let win_pct = ((best_child_q + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
+
+        let metrics = SearchMetrics {
+            root_visits,
+            best_child_visits,
+            win_pct,
+            top_moves,
+        };
+
+        (best_move, metrics)
     }
 
     fn playout(&self, board: &mut Board, eval_tx: &Sender<EvalRequest>) {

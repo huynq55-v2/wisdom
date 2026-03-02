@@ -187,7 +187,23 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
                 }
 
                 // Call MCTS Search instead of Alpha-Beta
-                let best_move = mcts.search_best_move(&board, simulations, &eval_tx, &tt, 4);
+                let (best_move, metrics) =
+                    mcts.search_best_move(&board, simulations, &eval_tx, &tt, 4);
+
+                // UCCI Info format: info depth 0 nodes {root_visits} score winpct {win_pct} pv {pv}
+                let mut pv_str = String::new();
+                for (m, _nv, _pct) in &metrics.top_moves {
+                    pv_str.push_str(&move_to_ucci_string(*m));
+                    pv_str.push(' ');
+                }
+
+                println!(
+                    "info depth 0 nodes {} score winpct {:.1} pv {}",
+                    metrics.root_visits,
+                    metrics.win_pct,
+                    pv_str.trim()
+                );
+
                 let move_str = move_to_ucci_string(best_move);
                 println!("bestmove {}", move_str);
             }
