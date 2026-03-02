@@ -164,10 +164,29 @@ impl MCTS {
             self.tree[0]
                 .children_index
                 .store(start_idx, Ordering::Release);
+
+            // --- THÊM SOFTMAX OVER LEGAL MOVES ---
+            let mut max_logit = -f32::MAX;
+            for m in &legal_moves {
+                let nn_idx = move_to_index(*m);
+                if policy[nn_idx] > max_logit {
+                    max_logit = policy[nn_idx];
+                }
+            }
+            let mut sum_exp = 0.0;
+            let mut exps = Vec::with_capacity(legal_moves.len());
+            for m in &legal_moves {
+                let nn_idx = move_to_index(*m);
+                let exp = (policy[nn_idx] - max_logit).exp();
+                exps.push(exp);
+                sum_exp += exp;
+            }
+            // -------------------------------------
+
             for (i, m) in legal_moves.iter().enumerate() {
                 let idx = start_idx as usize + i;
-                let nn_idx = move_to_index(*m);
-                let p = policy[nn_idx];
+                let p = exps[i] / sum_exp; // Gán Xác suất chuẩn [0, 1] thay vì Logit thô
+
                 self.tree[idx].visits.store(0, Ordering::Release);
                 self.tree[idx].total_value.store(0, Ordering::Release);
                 self.tree[idx].children_index.store(0, Ordering::Release);
@@ -280,8 +299,8 @@ impl MCTS {
                 let mut q = 0.0;
                 if cv > 0.0 {
                     let total_val = child.get_value();
-                    // FIX BUG 1: Đảo chiều Value
-                    q = -total_val / cv;
+                    // ĐÃ SỬA: Bỏ dấu trừ đi. Giá trị đã được đảo chiều đúng ở Backprop rồi!
+                    q = total_val / cv;
                 }
 
                 let prior = child.get_prior_prob();
@@ -426,11 +445,30 @@ impl MCTS {
                 // Cấp phát con
                 if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
                     leaf_node.children_index.store(start_idx, Ordering::Release);
+
+                    // --- THÊM SOFTMAX OVER LEGAL MOVES ---
+                    let mut max_logit = -f32::MAX;
+                    for m in &legal_moves {
+                        let nn_idx = move_to_index(*m);
+                        if p[nn_idx] > max_logit {
+                            max_logit = p[nn_idx];
+                        }
+                    }
+                    let mut sum_exp = 0.0;
+                    let mut exps = Vec::with_capacity(legal_moves.len());
+                    for m in &legal_moves {
+                        let nn_idx = move_to_index(*m);
+                        let exp = (p[nn_idx] - max_logit).exp();
+                        exps.push(exp);
+                        sum_exp += exp;
+                    }
+                    // -------------------------------------
+
                     for (i, m) in legal_moves.iter().enumerate() {
                         let idx = start_idx as usize + i;
-                        let nn_idx = move_to_index(*m);
+                        let prob = exps[i] / sum_exp; // Gán Xác suất chuẩn [0, 1]
 
-                        self.tree[idx].set_data(m.0, p[nn_idx]);
+                        self.tree[idx].set_data(m.0, prob);
                         self.tree[idx].visits.store(0, Ordering::Release);
                         self.tree[idx].total_value.store(0, Ordering::Release);
                         self.tree[idx].children_index.store(0, Ordering::Release);
