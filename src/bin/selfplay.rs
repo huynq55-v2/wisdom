@@ -13,7 +13,7 @@ use burn::{
     train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
 };
 use crossbeam_channel::Sender;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
@@ -282,7 +282,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
         let gives_check = board.is_in_check(board.side_to_move);
 
         let chased_set = if is_reversible && !gives_check {
-            let post_threats = board.get_unprotected_threats(current_side.opposite());
+            let post_threats = board.get_unprotected_threats(current_side);
             post_threats & !pre_threats
         } else {
             0
@@ -356,7 +356,28 @@ fn main() {
     let model_dir = "./wisdom_models";
     std::fs::create_dir_all(model_dir).expect("Failed to create models directory");
 
-    let checkpoint_path = format!("{}/xiangqi_net_latest", model_dir);
+    // TÌM CHECKPOINT MỚI NHẤT
+    let mut start_iteration = 0;
+    if let Ok(entries) = std::fs::read_dir(model_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().into_string().unwrap_or_default();
+            if fname.starts_with("xiangqi_net_ckpt_") {
+                if let Some(num_str) = fname.strip_prefix("xiangqi_net_ckpt_") {
+                    let num_part = num_str.split('.').next().unwrap_or("");
+                    if let Ok(num) = num_part.parse::<usize>() {
+                        start_iteration = start_iteration.max(num);
+                    }
+                }
+            }
+        }
+    }
+
+    let checkpoint_path = if start_iteration > 0 {
+        format!("{}/xiangqi_net_ckpt_{}", model_dir, start_iteration)
+    } else {
+        format!("{}/xiangqi_net_latest", model_dir) // fallback initially
+    };
+
     let temp_transfer_path = format!("{}/temp_transfer", model_dir);
 
     // CỐ GẮNG LOAD MODEL CŨ
@@ -379,19 +400,44 @@ fn main() {
         }
     };
 
-    let num_iterations = 50;
-    let games_per_iteration = 100;
+    let num_iterations = 500;
+    let games_per_iteration = 200;
 
     // 3. TỐI ƯU SỐ LUỒNG CHO CPU
-    // Kaggle có khoảng 30 cores CPU. Đặt concurrent_games = 32 là lý tưởng nhất.
-    // Nếu để 128 như trước, các thread sẽ tranh giành CPU gây ra hiệu ứng Context Switch cực kỳ chậm.
-    let concurrent_games = 64; // GPU Iris Xe: tạo đủ áp lực nhồi đầy Batch Size 64
+    // Hệ thống mạnh có thể chịu tới 32-64 concurrent games
+    let concurrent_games = 64;
 
-    // Khởi tạo Replay Buffer lưu tối đa khoảng 100,000 positions
+    // Khởi tạo Replay Buffer lưu tối đa khoảng 1,000,000 positions
     let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
-    let max_buffer_size = 500_000;
+    let max_buffer_size = 1_000_000;
+    let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
-    for iteration in 1..=num_iterations {
+    // Nạp lại dữ liệu cũ nếu có
+    if let Ok(file) = std::fs::File::open(&buffer_path) {
+        println!("Nap data tu {}...", buffer_path);
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(|l| l.ok()) {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() == 3 {
+                if let (Ok(value), Ok(policy)) =
+                    (parts[1].parse::<f32>(), parts[2].parse::<usize>())
+                {
+                    replay_buffer.push(SelfPlayItem {
+                        fen: parts[0].to_string(),
+                        value,
+                        policy,
+                    });
+                }
+            }
+        }
+        println!(
+            "Da nap xong {} ban ghi vao Replay Buffer.",
+            replay_buffer.len()
+        );
+    }
+
+    for iter in 1..=num_iterations {
+        let iteration = start_iteration + iter;
         println!("============================================================");
         println!(
             " Iteration {} / {} - Generating Data (CPU Mode)",
@@ -454,6 +500,13 @@ fn main() {
             replay_buffer.drain(0..excess);
         }
 
+        // Lưu Buffer ra đĩa
+        if let Ok(mut file) = std::fs::File::create(&buffer_path) {
+            for item in &replay_buffer {
+                let _ = writeln!(file, "{},{},{}", item.fen, item.value, item.policy);
+            }
+        }
+
         // TRAINING PHASE
         println!("============================================================");
         println!(
@@ -513,14 +566,15 @@ fn main() {
 
         model = trained_autodiff_model.valid();
 
-        // 4. CHECKPOINTING CHUẨN ĐƯỜNG DẪN
+        // 4. CHECKPOINTING CHUẨN ĐƯỜNG DẪN TÁCH RỜI TỪNG ITERATION
+        let new_ckpt_path = format!("{}/xiangqi_net_ckpt_{}", model_dir, iteration);
         model
             .clone()
-            .save_file(&checkpoint_path, &burn::record::CompactRecorder::new())
+            .save_file(&new_ckpt_path, &burn::record::CompactRecorder::new())
             .expect("Failed to save model");
 
         // 5. LƯU MODEL DƯỚI DẠNG NATIVE MPK CHO ENGINE/GUI
-        let final_mpk_path = format!("{}/xiangqi_net_weights", model_dir);
+        let final_mpk_path = format!("{}/xiangqi_net_{}", model_dir, iteration);
         model
             .clone()
             .save_file(
