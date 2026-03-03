@@ -450,8 +450,8 @@ fn main() {
     };
 
     let num_iterations = 500;
-    let games_per_iteration = 256;
-    let concurrent_games = 256; // Tối ưu: Bằng đúng batch_size của EvalQueue
+    let games_per_iteration = 128;
+    let concurrent_games = 128; // Tối ưu: Bằng đúng batch_size của EvalQueue
 
     // Khởi tạo TT 1 lần duy nhất, cấp 1024 MB (1 GB) dùng chung cho cả 128 luồng
     let shared_tt = Arc::new(TranspositionTable::new(1024));
@@ -506,7 +506,7 @@ fn main() {
         println!("============================================================");
 
         // GENERATION PHASE
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // GPU chạy infer batch 64
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1); // GPU chạy infer batch 64
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
