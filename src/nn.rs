@@ -122,27 +122,69 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
 }
 
 // ============================================================
-// CNN Model Definition (Value Head Only)
+// RESNET MODEL DEFINITION (Khớp 100% với train.py)
 // ============================================================
 
-/// A small CNN that evaluates a Xiangqi board position.
-///
-/// Architecture:
-///   Conv2d(15→64, 3×3, pad=1) → BN → ReLU
-///   Conv2d(64→128, 3×3, pad=1) → BN → ReLU
-///   Conv2d(128→128, 3×3, pad=1) → BN → ReLU
-///   ├─ Policy: Conv2d(128→2, 1×1) → Flatten [B,180] → Linear(180→8100)
-///   └─ Value:  GAP [B,128] → Linear(128→64) → ReLU → Linear(64→1) → Tanh
 #[derive(Module, Debug)]
-pub struct XiangqiNet<B: Backend> {
+pub struct ResBlock<B: Backend> {
     conv1: Conv2d<B>,
     bn1: BatchNorm<B, 2>,
     conv2: Conv2d<B>,
     bn2: BatchNorm<B, 2>,
-    conv3: Conv2d<B>,
-    bn3: BatchNorm<B, 2>,
+    relu: Relu,
+}
+
+impl<B: Backend> ResBlock<B> {
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let residual = x.clone();
+        let out = self.conv1.forward(x);
+        let out = self.bn1.forward(out);
+        let out = self.relu.forward(out);
+
+        let out = self.conv2.forward(out);
+        let out = self.bn2.forward(out);
+
+        let out = out + residual; // Skip connection
+        self.relu.forward(out)
+    }
+}
+
+pub struct ResBlockConfig {
+    channels: usize,
+}
+
+impl ResBlockConfig {
+    pub fn new(channels: usize) -> Self {
+        Self { channels }
+    }
+
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ResBlock<B> {
+        ResBlock {
+            // bias = false y như Python
+            conv1: Conv2dConfig::new([self.channels, self.channels], [3, 3])
+                .with_padding(burn::nn::PaddingConfig2d::Same)
+                .with_bias(false)
+                .init(device),
+            bn1: BatchNormConfig::new(self.channels).init(device),
+            conv2: Conv2dConfig::new([self.channels, self.channels], [3, 3])
+                .with_padding(burn::nn::PaddingConfig2d::Same)
+                .with_bias(false)
+                .init(device),
+            bn2: BatchNormConfig::new(self.channels).init(device),
+            relu: Relu::new(),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct XiangqiNet<B: Backend> {
+    conv_input: Conv2d<B>,
+    bn_input: BatchNorm<B, 2>,
+    res_blocks: Vec<ResBlock<B>>, // 7 ResBlocks
+
     conv_policy: Conv2d<B>,
     policy_head: Linear<B>,
+
     fc1: Linear<B>,
     value_head: Linear<B>,
     relu: Relu,
@@ -152,38 +194,37 @@ pub struct XiangqiNet<B: Backend> {
 pub struct XiangqiNetConfig;
 
 impl XiangqiNetConfig {
-    /// Initializes the model with random weights.
     pub fn init<B: Backend>(&self, device: &B::Device) -> XiangqiNet<B> {
+        let channels = 128;
+        let num_res_blocks = 7;
+
+        let mut res_blocks = Vec::with_capacity(num_res_blocks);
+        for _ in 0..num_res_blocks {
+            res_blocks.push(ResBlockConfig::new(channels).init(device));
+        }
+
         XiangqiNet {
-            conv1: Conv2dConfig::new([NUM_PLANES, 64], [3, 3])
+            conv_input: Conv2dConfig::new([NUM_PLANES, channels], [3, 3])
                 .with_padding(burn::nn::PaddingConfig2d::Same)
+                .with_bias(false)
                 .init(device),
-            bn1: BatchNormConfig::new(64).init(device),
-            conv2: Conv2dConfig::new([64, 128], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Same)
-                .init(device),
-            bn2: BatchNormConfig::new(128).init(device),
-            conv3: Conv2dConfig::new([128, 128], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Same)
-                .init(device),
-            bn3: BatchNormConfig::new(128).init(device),
-            conv_policy: Conv2dConfig::new([128, 2], [1, 1]).init(device),
+            bn_input: BatchNormConfig::new(channels).init(device),
+            res_blocks,
+
+            conv_policy: Conv2dConfig::new([channels, 2], [1, 1]).init(device),
             policy_head: LinearConfig::new(2 * BOARD_H * BOARD_W, ACTION_SPACE).init(device),
-            fc1: LinearConfig::new(128, 64).init(device),
+
+            fc1: LinearConfig::new(channels, 64).init(device),
             value_head: LinearConfig::new(64, 1).init(device),
             relu: Relu::new(),
         }
     }
 
-    /// Load model from a PyTorch record file.
-    /// Usage: config.load_model::<B>("path/to/model", &device)
     pub fn load_model<B: Backend>(&self, path: &str, device: &B::Device) -> XiangqiNet<B> {
         let model = self.init::<B>(device);
-
         let full_path = format!("{}.mpk", path);
         println!("🧠 Đang nạp bộ não Native Mpk từ: {}", full_path);
 
-        // Đọc trực tiếp định dạng nhị phân Native của Burn, tốc độ bàn thờ!
         let record = NamedMpkFileRecorder::<FullPrecisionSettings>::default()
             .load(full_path.into(), device)
             .expect("LỖI: Không nạp được file .mpk.");
@@ -193,35 +234,30 @@ impl XiangqiNetConfig {
 }
 
 impl<B: Backend> XiangqiNet<B> {
-    /// Forward pass: [B, 15, 10, 9] → (Value [B, 1], Policy [B, 8100])
     pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 2>, Tensor<B, 2>) {
-        // Conv block 1
-        let x = self.conv1.forward(x);
-        let x = self.bn1.forward(x);
-        let x = self.relu.forward(x);
+        let batch_size = x.dims()[0];
 
-        // Conv block 2
-        let x = self.conv2.forward(x);
-        let x = self.bn2.forward(x);
-        let x = self.relu.forward(x);
+        let mut x = self.conv_input.forward(x);
+        x = self.bn_input.forward(x);
+        x = self.relu.forward(x);
 
-        // Conv block 3 → x_spatial: [B, 128, 10, 9]
-        let x_spatial = self.conv3.forward(x);
-        let x_spatial = self.bn3.forward(x_spatial);
-        let x_spatial = self.relu.forward(x_spatial);
+        // Chạy qua 7 lớp ResBlock
+        for block in self.res_blocks.iter() {
+            x = block.forward(x);
+        }
+        let x_spatial = x;
+        let [_, channels, h, w] = x_spatial.dims();
 
-        let [batch, channels, h, w] = x_spatial.dims();
-
-        // --- BRANCH 1: POLICY HEAD (preserves spatial coordinates) ---
-        let x_pol = self.conv_policy.forward(x_spatial.clone()); // [B, 2, 10, 9]
-        let x_pol = x_pol.reshape([batch, 2 * h * w]); // [B, 180]
+        // --- BRANCH 1: POLICY HEAD ---
+        let x_pol = self.conv_policy.forward(x_spatial.clone());
+        let x_pol = x_pol.reshape([batch_size, 2 * h * w]);
         let logits_policy = self.policy_head.forward(x_pol);
 
-        // --- BRANCH 2: VALUE HEAD (Global Average Pooling) ---
+        // --- BRANCH 2: VALUE HEAD ---
         let spatial = h * w;
-        let x_val = x_spatial.reshape([batch, channels, spatial]); // [B, 128, 90]
-        let x_val = x_val.mean_dim(2); // [B, 128, 1]
-        let x_val = x_val.reshape([batch, channels]); // [B, 128]
+        let x_val = x_spatial.reshape([batch_size, channels, spatial]);
+        let x_val = x_val.mean_dim(2); // GAP
+        let x_val = x_val.reshape([batch_size, channels]);
         let x_val = self.fc1.forward(x_val);
         let x_val = self.relu.forward(x_val);
         let value = self.value_head.forward(x_val).tanh();

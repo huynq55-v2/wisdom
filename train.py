@@ -151,10 +151,10 @@ def train_model():
     print(f"Đang sử dụng thiết bị: {device}")
 
     batch_size = 512
-    learning_rate = 5e-4
-    epochs = 10
+    learning_rate = 1e-3
+    epochs = 8
 
-    full_dataset = XiangqiDataset("/kaggle/input/datasets/huyquang2309/xiangqi-mcts/xiangqi_dataset_augmented_1.csv")
+    full_dataset = XiangqiDataset("/kaggle/input/datasets/huyquang2309/xiangqi-mcts/xiangqi_dataset_cleaned.csv")
 
     val_size = int(0.05 * len(full_dataset))
     train_size = len(full_dataset) - val_size
@@ -164,7 +164,9 @@ def train_model():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     model = XiangqiNet().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # THÊM WEIGHT DECAY: Chống overfit cho model
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss()
 
@@ -180,13 +182,16 @@ def train_model():
             
             loss_v = mse_loss_fn(pred_values, target_values)
             loss_p = ce_loss_fn(pred_policies, target_policies)
-            loss = loss_v + loss_p
+            
+            # 1. TĂNG TRỌNG SỐ CHO VALUE HEAD (Gấp 2 lần để ép mạng học Value)
+            value_weight = 2.0 
+            loss = (value_weight * loss_v) + loss_p
 
             loss.backward()
             optimizer.step()
 
             if (batch_idx + 1) % 500 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx+1}/{len(train_loader)}] | Loss: {loss.item():.4f}")
+                print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx+1}/{len(train_loader)}] | Loss: {loss.item():.4f} (Value: {loss_v.item():.4f}, Policy: {loss_p.item():.4f})")
 
         model.eval()
         val_loss_v, val_loss_p = 0, 0
@@ -218,9 +223,19 @@ def train_model():
         print(f"Policy Accuracy (Top-1): {accuracy:.2f}%")
         print("-" * 50)
 
-    model.to("cpu")
-    save_file(model.state_dict(), "xiangqi_net_weights.safetensors")
-    print("🎉 Hoàn tất! Đã lưu model.")
+        # 2. LƯU MODEL NGAY SAU MỖI EPOCH VÀO Ổ CỨNG TRÁNH MẤT DATA
+        # Trích xuất State Dict sang CPU để lưu chuẩn safetensors
+        state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
+        
+        checkpoint_name = f"xiangqi_net_epoch_{epoch+1}.safetensors"
+        latest_name = "xiangqi_net_weights_latest.safetensors"
+        
+        save_file(state_dict_cpu, checkpoint_name)
+        save_file(state_dict_cpu, latest_name)
+        print(f"✅ Đã lưu an toàn: {checkpoint_name} và {latest_name}")
+        print("=" * 50)
+
+    print("🎉 Hoàn tất toàn bộ quá trình huấn luyện!")
 
 if __name__ == "__main__":
     train_model()
