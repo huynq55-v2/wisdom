@@ -135,8 +135,8 @@ impl MCTS {
             }
         }
 
-        // Đánh giá Root: Thử lấy từ TT trước, nếu trượt mới gọi NN
-        let (policy, _v) = if let Some(tt_data) = tt.probe(root_board.zobrist_key) {
+        // Đánh giá Root: Lấy mảng Nén (Sparse Policy)
+        let (p_sparse, _v) = if let Some(tt_data) = tt.probe(root_board.zobrist_key) {
             (tt_data.policy.clone(), tt_data.value)
         } else {
             let tensor = crate::nn::board_to_tensor(root_board);
@@ -149,81 +149,89 @@ impl MCTS {
                 })
                 .unwrap();
             let (val, opt_p) = rx.recv().unwrap();
-            let pol = opt_p.unwrap();
+            let p_full = opt_p.unwrap();
 
-            // Lưu vào TT
-            tt.record(root_board.zobrist_key, val, pol.clone());
-            (pol, val)
+            // Lọc ngay lập tức: Chỉ lấy các move hợp lệ nén vào p_sparse
+            let sparse: Vec<(u16, f32)> = legal_moves
+                .iter()
+                .map(|m| {
+                    let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
+                    (m.0, p_full[nn_idx])
+                })
+                .collect();
+
+            tt.record(root_board.zobrist_key, val, sparse.clone());
+            (sparse, val)
         };
 
-        if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
+        if let Some(start_idx) = self.allocate_children(p_sparse.len() as u32) {
             self.tree[0]
                 .children_index
                 .store(start_idx, Ordering::Release);
 
-            // --- THÊM SOFTMAX OVER LEGAL MOVES ---
+            // --- THÊM SOFTMAX TRÊN MẢNG NÉN ---
             let mut max_logit = -f32::MAX;
-            for m in &legal_moves {
-                let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
-                if policy[nn_idx] > max_logit {
-                    max_logit = policy[nn_idx];
+            for &(_, logit) in &p_sparse {
+                if logit > max_logit {
+                    max_logit = logit;
                 }
             }
+
             let mut sum_exp = 0.0;
-            let mut exps = Vec::with_capacity(legal_moves.len());
-            for m in &legal_moves {
-                let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
-                let exp = (policy[nn_idx] - max_logit).exp();
+            let mut exps = Vec::with_capacity(p_sparse.len());
+            for &(_, logit) in &p_sparse {
+                let exp = (logit - max_logit).exp();
                 exps.push(exp);
                 sum_exp += exp;
             }
-            // -------------------------------------
 
-            // Gán xác suất chuẩn
             let mut priors: Vec<f32> = exps.into_iter().map(|exp| exp / sum_exp).collect();
 
-            // --- THÊM DIRICHLET NOISE CHO SELF-PLAY ---
-            // AlphaZero dùng alpha = 0.3 cho Cờ vua (nhánh ~30), Cờ tướng nhánh ~40 dùng 0.3 là đẹp.
-            // Epsilon = 0.25 (25% tò mò, 75% nghe theo Mạng Neural)
-            if add_noise && legal_moves.len() > 1 {
-                let alpha = vec![0.3; legal_moves.len()];
+            // Thêm Dirichlet Noise
+            if add_noise && p_sparse.len() > 1 {
+                let alpha = vec![0.3; p_sparse.len()];
                 if let Ok(dirichlet) = Dirichlet::new(&alpha) {
                     let mut rng = rand::thread_rng();
                     let noise = dirichlet.sample(&mut rng);
-                    let epsilon = 0.25;
-                    for i in 0..legal_moves.len() {
-                        priors[i] = (1.0 - epsilon) * priors[i] + epsilon * (noise[i] as f32);
+                    for i in 0..p_sparse.len() {
+                        priors[i] = (1.0 - 0.25) * priors[i] + 0.25 * (noise[i] as f32);
                     }
                 }
             }
-            // ------------------------------------------
 
-            for (i, m) in legal_moves.iter().enumerate() {
+            // Gán dữ liệu cho con
+            for (i, &(move_val, _)) in p_sparse.iter().enumerate() {
                 let idx = start_idx as usize + i;
-                let p = priors[i]; // Gán Priors đã được bơm nhiễu
-
                 self.tree[idx].visits.store(0, Ordering::Release);
                 self.tree[idx].total_value.store(0, Ordering::Release);
                 self.tree[idx].children_index.store(0, Ordering::Release);
                 self.tree[idx].num_children.store(0, Ordering::Release);
-                self.tree[idx].set_data(m.0, p);
+                self.tree[idx].set_data(move_val, priors[i]);
             }
             self.tree[0]
                 .num_children
-                .store(legal_moves.len() as u32, Ordering::Release);
+                .store(p_sparse.len() as u32, Ordering::Release);
         }
 
-        std::thread::scope(|s| {
-            for _ in 0..num_threads {
-                s.spawn(|| {
-                    let mut local_board = root_board.clone();
-                    for _ in 0..(simulations / num_threads) {
-                        self.playout(root_board, &mut local_board, eval_tx, tt);
-                        local_board = root_board.clone();
-                    }
-                });
+        if num_threads == 1 {
+            let mut local_board = root_board.clone();
+            for _ in 0..simulations {
+                self.playout(root_board, &mut local_board, eval_tx, tt);
+                local_board = root_board.clone();
             }
-        });
+        } else {
+            std::thread::scope(|s| {
+                for _ in 0..num_threads {
+                    s.spawn(|| {
+                        let mut local_board = root_board.clone();
+                        for _ in 0..(simulations / num_threads) {
+                            self.playout(root_board, &mut local_board, eval_tx, tt);
+                            local_board = root_board.clone();
+                        }
+                    });
+                }
+            });
+        }
 
         // Chọn nước đi có số lần duyệt (Visits) cao nhất
         let root_visits = self.tree[0].visits.load(Ordering::Acquire);
@@ -478,10 +486,10 @@ impl MCTS {
                 .compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
-                let p;
+                let p_sparse;
                 if let Some(tt_data) = tt.probe(board.zobrist_key) {
                     value = tt_data.value;
-                    p = tt_data.policy.clone();
+                    p_sparse = tt_data.policy.clone();
                 } else {
                     // Ta đã khóa được Node! Gọi GPU đánh giá
                     let tensor = crate::nn::board_to_tensor(board);
@@ -496,37 +504,43 @@ impl MCTS {
 
                     let (v, opt_p) = rx.recv().unwrap();
                     value = v;
-                    p = opt_p.unwrap();
-                    tt.record(board.zobrist_key, value, p.clone());
+                    let p_full = opt_p.unwrap();
+
+                    // Lọc và nén Policy
+                    p_sparse = legal_moves
+                        .iter()
+                        .map(|m| {
+                            let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
+                            (m.0, p_full[nn_idx])
+                        })
+                        .collect();
+
+                    tt.record(board.zobrist_key, value, p_sparse.clone());
                 }
 
-                // Cấp phát con
-                if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {
+                // Cấp phát con từ mảng p_sparse
+                if let Some(start_idx) = self.allocate_children(p_sparse.len() as u32) {
                     leaf_node.children_index.store(start_idx, Ordering::Release);
 
-                    // --- THÊM SOFTMAX OVER LEGAL MOVES ---
                     let mut max_logit = -f32::MAX;
-                    for m in &legal_moves {
-                        let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
-                        if p[nn_idx] > max_logit {
-                            max_logit = p[nn_idx];
+                    for &(_, logit) in &p_sparse {
+                        if logit > max_logit {
+                            max_logit = logit;
                         }
                     }
+
                     let mut sum_exp = 0.0;
-                    let mut exps = Vec::with_capacity(legal_moves.len());
-                    for m in &legal_moves {
-                        let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
-                        let exp = (p[nn_idx] - max_logit).exp();
+                    let mut exps = Vec::with_capacity(p_sparse.len());
+                    for &(_, logit) in &p_sparse {
+                        let exp = (logit - max_logit).exp();
                         exps.push(exp);
                         sum_exp += exp;
                     }
-                    // -------------------------------------
 
-                    for (i, m) in legal_moves.iter().enumerate() {
+                    for (i, &(move_val, _)) in p_sparse.iter().enumerate() {
+                        let prob = exps[i] / sum_exp;
                         let idx = start_idx as usize + i;
-                        let prob = exps[i] / sum_exp; // Gán Xác suất chuẩn [0, 1]
-
-                        self.tree[idx].set_data(m.0, prob);
+                        self.tree[idx].set_data(move_val, prob);
                         self.tree[idx].visits.store(0, Ordering::Release);
                         self.tree[idx].total_value.store(0, Ordering::Release);
                         self.tree[idx].children_index.store(0, Ordering::Release);
@@ -535,7 +549,7 @@ impl MCTS {
                     // Mở khóa
                     leaf_node
                         .num_children
-                        .store(legal_moves.len() as u32, Ordering::Release);
+                        .store(p_sparse.len() as u32, Ordering::Release);
                 }
             } else {
                 // Có một luồng khác đang mở rộng Node này. Ta Spin-wait.

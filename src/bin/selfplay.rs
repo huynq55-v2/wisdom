@@ -190,16 +190,17 @@ fn get_all_legal_moves(board: &mut Board) -> Vec<wisdom::r#move::Move> {
 }
 
 /// Play a single self-play game. Returns Vec<(FEN, value)> with ground-truth-blended values.
-fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
+fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec<SelfPlayItem> {
     let mut board = Board::new();
     board.set_initial_position();
-    let tt = TranspositionTable::new(32);
     let mut history = Vec::new();
 
     // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
     let winner: Option<Color>;
+
+    let mcts = MCTS::new(50_000);
 
     loop {
         let legal_moves = get_all_legal_moves(&mut board);
@@ -234,8 +235,6 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             }
             _ => {}
         }
-
-        let mcts = MCTS::new(50_000);
 
         // Chạy MCTS với 400 simulations và BẬT DIRICHLET NOISE (true)
         let simulations = 400;
@@ -393,8 +392,11 @@ fn main() {
     };
 
     let num_iterations = 500;
-    let games_per_iteration = 200;
-    let concurrent_games = 64; // Tối ưu: Bằng đúng batch_size của EvalQueue
+    let games_per_iteration = 256;
+    let concurrent_games = 128; // Tối ưu: Bằng đúng batch_size của EvalQueue
+
+    // Khởi tạo TT 1 lần duy nhất, cấp 1024 MB (1 GB) dùng chung cho cả 128 luồng
+    let shared_tt = Arc::new(TranspositionTable::new(1024));
 
     // CẤU TRÚC LƯU TRỮ CHIA SẺ (Thread-safe)
     let max_buffer_size = 1_000_000;
@@ -446,7 +448,7 @@ fn main() {
         println!("============================================================");
 
         // GENERATION PHASE
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // GPU chạy infer batch 64
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 128, 1); // GPU chạy infer batch 64
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -473,10 +475,11 @@ fn main() {
                     let tx = &eval_tx;
                     let rb_clone = Arc::clone(&replay_buffer_arc);
                     let file_clone = Arc::clone(&file_arc);
+                    let tt_clone = Arc::clone(&shared_tt);
 
                     s.spawn(move || {
                         // Chạy 1 ván cờ (Tốn thời gian)
-                        let records = play_game(tx);
+                        let records = play_game(tx, &tt_clone);
                         let len = records.len();
 
                         // 1. CẬP NHẬT NGAY VÀO RAM BUFFER

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct TTNodeData {
     pub value: f32,
-    pub policy: Vec<f32>,
+    pub policy: Vec<(u16, f32)>, // ĐÃ SỬA: Mảng Sparse (Move, Logit)
 }
 
 pub struct TTEntry {
@@ -19,10 +19,9 @@ pub struct TranspositionTable {
 
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
-        // Khắc phục lỗi tràn RAM: TTEntry size_of chỉ tính 16-24 byte "vỏ".
-        // Ta phải cộng thêm mảng Policy (Vec<f32> trên Heap) gồm 8100 phần tử (ACTION_SPACE).
         let base_size = std::mem::size_of::<TTEntry>();
-        let heap_policy_size = 8100 * std::mem::size_of::<f32>(); // ~32.4 KB
+        // ĐÃ SỬA: Kích thước mảng giờ chỉ khoảng 40 phần tử (mỗi phần tử 6 bytes = 2 bytes u16 + 4 bytes f32)
+        let heap_policy_size = 40 * std::mem::size_of::<(u16, f32)>();
         let real_entry_size = base_size + heap_policy_size;
 
         let num_entries = (size_mb * 1024 * 1024) / real_entry_size;
@@ -57,7 +56,7 @@ impl TranspositionTable {
     }
 
     /// Lưu kết quả sau khi Model ResNet chạy xong
-    pub fn record(&self, key: u64, value: f32, policy: Vec<f32>) {
+    pub fn record(&self, key: u64, value: f32, policy: Vec<(u16, f32)>) {
         let index = (key as usize) & self.mask;
         let entry = &self.entries[index];
 
