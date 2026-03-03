@@ -199,7 +199,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
-    let mut winner: Option<Color> = None;
+    let winner: Option<Color>;
 
     loop {
         let legal_moves = get_all_legal_moves(&mut board);
@@ -235,8 +235,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
             _ => {}
         }
 
-        // Khởi tạo MCTS (Cây nhỏ 5000 node là đủ cho Self-play)
-        let mcts = MCTS::new(5_000);
+        let mcts = MCTS::new(50_000);
 
         // Chạy MCTS với 400 simulations và BẬT DIRICHLET NOISE (true)
         let simulations = 400;

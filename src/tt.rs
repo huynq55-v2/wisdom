@@ -19,9 +19,13 @@ pub struct TranspositionTable {
 
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
-        // Mỗi entry tốn khoảng 16-24 bytes (không tính phần Vec trong Heap)
-        let entry_size = std::mem::size_of::<TTEntry>();
-        let num_entries = (size_mb * 1024 * 1024) / entry_size;
+        // Khắc phục lỗi tràn RAM: TTEntry size_of chỉ tính 16-24 byte "vỏ".
+        // Ta phải cộng thêm mảng Policy (Vec<f32> trên Heap) gồm 8100 phần tử (ACTION_SPACE).
+        let base_size = std::mem::size_of::<TTEntry>();
+        let heap_policy_size = 8100 * std::mem::size_of::<f32>(); // ~32.4 KB
+        let real_entry_size = base_size + heap_policy_size;
+
+        let num_entries = (size_mb * 1024 * 1024) / real_entry_size;
 
         let power_of_2 = num_entries.next_power_of_two() / 2;
         let mut entries = Vec::with_capacity(power_of_2);
