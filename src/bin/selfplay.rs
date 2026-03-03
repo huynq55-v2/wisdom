@@ -409,7 +409,7 @@ fn main() {
 
     // Khởi tạo Replay Buffer lưu tối đa khoảng 1,000,000 positions
     let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
-    let max_buffer_size = 1_000_000;
+    let max_buffer_size = 2_000_000;
     let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
     // Nạp lại dữ liệu cũ nếu có
