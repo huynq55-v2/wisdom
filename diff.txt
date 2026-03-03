@@ -1,0 +1,103 @@
+diff --git a/src/mcts.rs b/src/mcts.rs
+index c03f41c..ea294af 100644
+--- a/src/mcts.rs
++++ b/src/mcts.rs
+@@ -109,7 +109,7 @@ impl MCTS {
+         root_board: &Board,
+         simulations: usize,
+         eval_tx: &Sender<EvalRequest>,
+-        _tt: &TranspositionTable,
++        tt: &TranspositionTable,
+         num_threads: usize,
+         add_noise: bool,
+     ) -> (Move, SearchMetrics) {
+@@ -136,7 +136,7 @@ impl MCTS {
+         }
+ 
+         // Đánh giá Root: Thử lấy từ TT trước, nếu trượt mới gọi NN
+-        let (policy, _v) = if let Some(tt_data) = _tt.probe(root_board.zobrist_key) {
++        let (policy, _v) = if let Some(tt_data) = tt.probe(root_board.zobrist_key) {
+             (tt_data.policy.clone(), tt_data.value)
+         } else {
+             let tensor = crate::nn::board_to_tensor(root_board);
+@@ -152,7 +152,7 @@ impl MCTS {
+             let pol = opt_p.unwrap();
+ 
+             // Lưu vào TT
+-            _tt.record(root_board.zobrist_key, val, pol.clone());
++            tt.record(root_board.zobrist_key, val, pol.clone());
+             (pol, val)
+         };
+ 
+@@ -213,13 +213,12 @@ impl MCTS {
+                 .store(legal_moves.len() as u32, Ordering::Release);
+         }
+ 
+-        // Khởi chạy Đa luồng (Tree Parallelism)
+         std::thread::scope(|s| {
+             for _ in 0..num_threads {
+                 s.spawn(|| {
+                     let mut local_board = root_board.clone();
+                     for _ in 0..(simulations / num_threads) {
+-                        self.playout(root_board, &mut local_board, eval_tx);
++                        self.playout(root_board, &mut local_board, eval_tx, tt);
+                         local_board = root_board.clone();
+                     }
+                 });
+@@ -276,7 +275,13 @@ impl MCTS {
+         (best_move, metrics)
+     }
+ 
+-    fn playout(&self, master_board: &Board, board: &mut Board, eval_tx: &Sender<EvalRequest>) {
++    fn playout(
++        &self,
++        master_board: &Board,
++        board: &mut Board,
++        eval_tx: &Sender<EvalRequest>,
++        tt: &TranspositionTable,
++    ) {
+         let mut path = Vec::with_capacity(64);
+         let mut current_idx = 0;
+         path.push(current_idx);
+@@ -473,20 +478,27 @@ impl MCTS {
+                 .compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
+                 .is_ok()
+             {
+-                // Ta đã khóa được Node! Gọi GPU đánh giá
+-                let tensor = crate::nn::board_to_tensor(board);
+-                let (tx, rx) = crossbeam_channel::bounded(1);
+-                eval_tx
+-                    .send(EvalRequest {
+-                        tensor_data: tensor,
+-                        response_tx: tx,
+-                        need_policy: true,
+-                    })
+-                    .unwrap();
+-
+-                let (v, opt_p) = rx.recv().unwrap();
+-                value = v;
+-                let p = opt_p.unwrap();
++                let p;
++                if let Some(tt_data) = tt.probe(board.zobrist_key) {
++                    value = tt_data.value;
++                    p = tt_data.policy.clone();
++                } else {
++                    // Ta đã khóa được Node! Gọi GPU đánh giá
++                    let tensor = crate::nn::board_to_tensor(board);
++                    let (tx, rx) = crossbeam_channel::bounded(1);
++                    eval_tx
++                        .send(EvalRequest {
++                            tensor_data: tensor,
++                            response_tx: tx,
++                            need_policy: true,
++                        })
++                        .unwrap();
++
++                    let (v, opt_p) = rx.recv().unwrap();
++                    value = v;
++                    p = opt_p.unwrap();
++                    tt.record(board.zobrist_key, value, p.clone());
++                }
+ 
+                 // Cấp phát con
+                 if let Some(start_idx) = self.allocate_children(legal_moves.len() as u32) {

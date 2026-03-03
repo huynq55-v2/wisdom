@@ -242,6 +242,12 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
         let (best_move, metrics) =
             mcts.search_best_move(&board, simulations, eval_tx, &tt, 1, true);
 
+        // ==========================================
+        // THÊM 2 DÒNG NÀY ĐỂ BÁO HIỆU ĐÃ TÌM XONG 1 NƯỚC
+        print!(".");
+        let _ = std::io::stdout().flush();
+        // ==========================================
+
         // Quy đổi win_pct [0..100] về dải [-1.0 .. 1.0] làm Search Value
         let normalized_score = (metrics.win_pct / 50.0) - 1.0;
         let current_side = board.side_to_move;
