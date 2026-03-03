@@ -41,15 +41,10 @@ impl EvalQueue {
                     Err(_) => break, // Channel closed, exit thread
                 }
 
-                // Collect more requests up to batch_size with a small timeout
-                let batch_deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                // Collect more requests up to batch_size with a sliding timeout
+                let gap_timeout = std::time::Duration::from_millis(timeout_ms);
                 while requests.len() < batch_size {
-                    let now = std::time::Instant::now();
-                    if now >= batch_deadline {
-                        break;
-                    }
-                    match rx.recv_timeout(batch_deadline - now) {
+                    match rx.recv_timeout(gap_timeout) {
                         Ok(req) => {
                             batch_inputs.extend_from_slice(&req.tensor_data);
                             requests.push(req);

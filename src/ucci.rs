@@ -127,7 +127,7 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
     // Store transmitter for MCTS
     let eval_tx = eval_queue.tx.clone();
 
-    let mcts = MCTS::new(100_000); // Pre-allocate 100k nodes
+    let mcts = MCTS::new(2_000_000); // Pre-allocate 100k nodes
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {

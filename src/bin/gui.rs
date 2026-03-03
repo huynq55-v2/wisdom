@@ -310,6 +310,7 @@ async fn main() {
 
     println!("GUI: Spawning Wisdom Engine Subprocess...");
     let mut engine_process = Command::new("./wisdom")
+        .arg("gpu")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
