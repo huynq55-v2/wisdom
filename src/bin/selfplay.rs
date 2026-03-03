@@ -457,7 +457,7 @@ fn main() {
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
     // CẤU TRÚC LƯU TRỮ CHIA SẺ (Thread-safe)
-    let max_buffer_size = 1_000_000;
+    let max_buffer_size = 2_000_000;
     let mut initial_buffer: Vec<SelfPlayItem> = Vec::new();
     let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
