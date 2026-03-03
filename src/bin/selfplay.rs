@@ -393,7 +393,7 @@ fn main() {
 
     let num_iterations = 500;
     let games_per_iteration = 256;
-    let concurrent_games = 128; // Tối ưu: Bằng đúng batch_size của EvalQueue
+    let concurrent_games = 256; // Tối ưu: Bằng đúng batch_size của EvalQueue
 
     // Khởi tạo TT 1 lần duy nhất, cấp 1024 MB (1 GB) dùng chung cho cả 128 luồng
     let shared_tt = Arc::new(TranspositionTable::new(1024));
@@ -448,7 +448,7 @@ fn main() {
         println!("============================================================");
 
         // GENERATION PHASE
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 128, 1); // GPU chạy infer batch 64
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // GPU chạy infer batch 64
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -494,7 +494,6 @@ fn main() {
                             for item in &records {
                                 let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
                             }
-                            let _ = f.flush(); // Đảm bảo ghi ngay ra đĩa
                         }
 
                         print!("g{}({}) ", game_i + 1, len);
@@ -503,6 +502,12 @@ fn main() {
                 }
             });
             println!();
+
+            // XẢ TOÀN BỘ DATA CỦA BATCH XUỐNG Ổ CỨNG TRONG 1 LẦN DUY NHẤT
+            {
+                let mut f = file_arc.lock().unwrap();
+                let _ = f.flush();
+            }
         }
 
         drop(eval_tx);
@@ -553,13 +558,13 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(32) // Tùy chỉnh: có thể tăng lên 128/256 khi train
+            .batch_size(256) // Tùy chỉnh: có thể tăng lên 128/256 khi train
             .shuffle(42)
             .num_workers(2)
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-            .batch_size(32)
+            .batch_size(256)
             .shuffle(42)
             .num_workers(2)
             .build(RAMDataset { items: valid_data });
