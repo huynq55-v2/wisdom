@@ -13,8 +13,9 @@ use burn::{
     train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
 };
 use crossbeam_channel::Sender;
-use std::io::{BufRead, BufReader, Write};
-use std::sync::Mutex;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::mcts::MCTS;
@@ -352,7 +353,6 @@ fn main() {
     let device = burn::backend::wgpu::WgpuDevice::default();
     let config = XiangqiNetConfig::new();
 
-    // 2. SỬA BUG ĐƯỜNG DẪN: Lưu tất cả vào thư mục cục bộ thay vì /tmp
     let model_dir = "./wisdom_models";
     std::fs::create_dir_all(model_dir).expect("Failed to create models directory");
 
@@ -375,7 +375,7 @@ fn main() {
     let checkpoint_path = if start_iteration > 0 {
         format!("{}/xiangqi_net_ckpt_{}", model_dir, start_iteration)
     } else {
-        format!("{}/xiangqi_net_latest", model_dir) // fallback initially
+        format!("{}/xiangqi_net_latest", model_dir)
     };
 
     let temp_transfer_path = format!("{}/temp_transfer", model_dir);
@@ -402,19 +402,16 @@ fn main() {
 
     let num_iterations = 500;
     let games_per_iteration = 200;
+    let concurrent_games = 64; // Tối ưu: Bằng đúng batch_size của EvalQueue
 
-    // 3. TỐI ƯU SỐ LUỒNG CHO CPU
-    // Hệ thống mạnh có thể chịu tới 32-64 concurrent games
-    let concurrent_games = 64;
-
-    // Khởi tạo Replay Buffer lưu tối đa khoảng 1,000,000 positions
-    let mut replay_buffer: Vec<SelfPlayItem> = Vec::new();
-    let max_buffer_size = 2_000_000;
+    // CẤU TRÚC LƯU TRỮ CHIA SẺ (Thread-safe)
+    let max_buffer_size = 1_000_000;
+    let mut initial_buffer: Vec<SelfPlayItem> = Vec::new();
     let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
     // Nạp lại dữ liệu cũ nếu có
     if let Ok(file) = std::fs::File::open(&buffer_path) {
-        println!("Nap data tu {}...", buffer_path);
+        println!("Đang nạp data từ {}...", buffer_path);
         let reader = BufReader::new(file);
         for line in reader.lines().map_while(|l| l.ok()) {
             let parts: Vec<&str> = line.split(',').collect();
@@ -422,7 +419,7 @@ fn main() {
                 if let (Ok(value), Ok(policy)) =
                     (parts[1].parse::<f32>(), parts[2].parse::<usize>())
                 {
-                    replay_buffer.push(SelfPlayItem {
+                    initial_buffer.push(SelfPlayItem {
                         fen: parts[0].to_string(),
                         value,
                         policy,
@@ -431,25 +428,33 @@ fn main() {
             }
         }
         println!(
-            "Da nap xong {} ban ghi vao Replay Buffer.",
-            replay_buffer.len()
+            "Đã nạp xong {} bản ghi vào Replay Buffer.",
+            initial_buffer.len()
         );
     }
+
+    // Đưa Buffer vào Arc<Mutex> để các thread có thể ghi trực tiếp
+    let replay_buffer_arc = Arc::new(Mutex::new(initial_buffer));
+
+    // Mở file ở chế độ Ghi nối tiếp (Append) và đưa vào Arc<Mutex>
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&buffer_path)
+        .expect("Không thể mở replay buffer file");
+    let file_arc = Arc::new(Mutex::new(BufWriter::new(file)));
 
     for iter in 1..=num_iterations {
         let iteration = start_iteration + iter;
         println!("============================================================");
         println!(
-            " Iteration {} / {} - Generating Data (CPU Mode)",
+            " Iteration {} / {} - Generating Data (CPU-MCTS + GPU-NN Batched)",
             iteration, num_iterations
         );
         println!("============================================================");
 
-        let iteration_data = Mutex::new(Vec::new());
-
         // GENERATION PHASE
-        // batch_size của CPU có thể để nhỏ (ví dụ 16 hoặc 32) để giảm đỗ trễ
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // Batch 64 cho GPU
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 64, 1); // GPU chạy infer batch 64
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -471,15 +476,32 @@ fn main() {
             );
             std::io::stdout().flush().unwrap();
 
-            // Nhờ std::thread::scope, hàm này đã tự động chạy song song N ván cờ trên N nhân CPU!
             std::thread::scope(|s| {
                 for game_i in 0..games_in_batch {
                     let tx = &eval_tx;
-                    let data = &iteration_data;
+                    let rb_clone = Arc::clone(&replay_buffer_arc);
+                    let file_clone = Arc::clone(&file_arc);
+
                     s.spawn(move || {
+                        // Chạy 1 ván cờ (Tốn thời gian)
                         let records = play_game(tx);
                         let len = records.len();
-                        data.lock().unwrap().extend(records);
+
+                        // 1. CẬP NHẬT NGAY VÀO RAM BUFFER
+                        {
+                            let mut rb = rb_clone.lock().unwrap();
+                            rb.extend(records.clone());
+                        }
+
+                        // 2. GHI NỐI TIẾP NGAY VÀO FILE Ổ CỨNG (Append)
+                        {
+                            let mut f = file_clone.lock().unwrap();
+                            for item in &records {
+                                let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
+                            }
+                            let _ = f.flush(); // Đảm bảo ghi ngay ra đĩa
+                        }
+
                         print!("g{}({}) ", game_i + 1, len);
                         let _ = std::io::stdout().flush();
                     });
@@ -492,33 +514,41 @@ fn main() {
         drop(eval_queue);
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
-        let mut iteration_data = iteration_data.into_inner().unwrap();
-        replay_buffer.append(&mut iteration_data);
+        // KIỂM TRA VÀ CẮT TỈA (TRIM) BUFFER NẾU VƯỢT QUÁ GIỚI HẠN
+        {
+            let mut rb = replay_buffer_arc.lock().unwrap();
+            if rb.len() > max_buffer_size {
+                let excess = rb.len() - max_buffer_size;
+                rb.drain(0..excess); // Xóa data cũ nhất ở đầu
+                println!("Đã cắt tỉa {} bản ghi cũ khỏi Replay Buffer.", excess);
 
-        if replay_buffer.len() > max_buffer_size {
-            let excess = replay_buffer.len() - max_buffer_size;
-            replay_buffer.drain(0..excess);
-        }
-
-        // Lưu Buffer ra đĩa
-        if let Ok(mut file) = std::fs::File::create(&buffer_path) {
-            for item in &replay_buffer {
-                let _ = writeln!(file, "{},{},{}", item.fen, item.value, item.policy);
+                // Vì đã xóa data cũ, ta phải Ghi đè (Overwrite) lại toàn bộ file CSV
+                let mut f = file_arc.lock().unwrap();
+                *f = BufWriter::new(std::fs::File::create(&buffer_path).unwrap());
+                for item in rb.iter() {
+                    let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
+                }
+                let _ = f.flush();
             }
         }
 
         // TRAINING PHASE
+        let dataset_snapshot = {
+            let rb = replay_buffer_arc.lock().unwrap();
+            rb.clone() // Clone ra để nhả Lock, giúp train không khóa mất biến
+        };
+
         println!("============================================================");
         println!(
-            " Iteration {} / {} - Training Model on {} positions (Replay Buffer)",
+            " Iteration {} / {} - Training Model on {} positions",
             iteration,
             num_iterations,
-            replay_buffer.len()
+            dataset_snapshot.len()
         );
         println!("============================================================");
 
         use rand::seq::SliceRandom;
-        let mut train_dataset = replay_buffer.clone();
+        let mut train_dataset = dataset_snapshot;
         train_dataset.shuffle(&mut rand::thread_rng());
         let split_idx = (train_dataset.len() as f32 * 0.9) as usize;
         let train_data = train_dataset[0..split_idx].to_vec();
@@ -528,15 +558,15 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(32)
+            .batch_size(32) // Tùy chỉnh: có thể tăng lên 128/256 khi train
             .shuffle(42)
-            .num_workers(1)
+            .num_workers(2)
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
             .batch_size(32)
             .shuffle(42)
-            .num_workers(1)
+            .num_workers(2)
             .build(RAMDataset { items: valid_data });
 
         let optim = AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4)));
@@ -555,16 +585,21 @@ fn main() {
             .init::<MyAutodiffBackend>(&device)
             .load_record(record);
 
-        // Đổi đường dẫn Learner về model_dir
-        let learner = LearnerBuilder::new(model_dir)
+        // ĐÃ FIX BUG LEARNER: Tạo thư mục learner RIÊNG BIỆT cho từng iteration
+        let iter_learner_dir = format!("{}/learner_iter_{}", model_dir, iteration);
+
+        let learner = LearnerBuilder::new(&iter_learner_dir)
             .with_file_checkpointer(burn::record::CompactRecorder::new())
             .devices(vec![device.clone()])
-            .num_epochs(1)
+            .num_epochs(1) // Chạy 1 Epoch cho mỗi Iteration
             .build(autodiff_model, optim.init(), 1e-4);
 
         let trained_autodiff_model = learner.fit(dataloader_train, dataloader_valid);
 
         model = trained_autodiff_model.valid();
+
+        // Xóa thư mục Learner tạm để giải phóng ổ cứng
+        let _ = std::fs::remove_dir_all(&iter_learner_dir);
 
         // 4. CHECKPOINTING CHUẨN ĐƯỜNG DẪN TÁCH RỜI TỪNG ITERATION
         let new_ckpt_path = format!("{}/xiangqi_net_ckpt_{}", model_dir, iteration);
