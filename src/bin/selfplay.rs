@@ -189,15 +189,6 @@ fn get_all_legal_moves(board: &mut Board) -> Vec<wisdom::r#move::Move> {
     legal_moves
 }
 
-/// Enum to track game outcome from the perspective of the side that just played.
-#[derive(Debug, Clone, Copy)]
-enum GameResult {
-    /// The side to move has no legal moves and IS in check => they lost.
-    /// This means the side that played the LAST move won.
-    Win,
-    Draw,
-}
-
 /// Play a single self-play game. Returns Vec<(FEN, value)> with ground-truth-blended values.
 fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     let mut board = Board::new();
@@ -208,33 +199,37 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
-    let result;
+    let mut winner: Option<Color> = None;
 
     loop {
         let legal_moves = get_all_legal_moves(&mut board);
         if legal_moves.is_empty() {
             if board.is_in_check(board.side_to_move) {
-                // Current side to move is mated => the side that played the last move won
-                result = GameResult::Win;
+                winner = Some(board.side_to_move.opposite());
             } else {
-                // Stalemate => Draw
-                result = GameResult::Draw;
+                winner = None;
             }
             break;
         }
 
         if move_count > 400 {
-            result = GameResult::Draw;
+            winner = None;
             break;
         }
 
         // Check repetition before searching
         let rep = board.judge_repetition(&history, move_count, 1);
         match rep {
-            wisdom::board::RepetitionResult::Draw
-            | wisdom::board::RepetitionResult::Win
-            | wisdom::board::RepetitionResult::Loss => {
-                result = GameResult::Draw;
+            wisdom::board::RepetitionResult::Draw => {
+                winner = None;
+                break;
+            }
+            wisdom::board::RepetitionResult::Loss => {
+                winner = Some(board.side_to_move.opposite());
+                break;
+            }
+            wisdom::board::RepetitionResult::Win => {
+                winner = Some(board.side_to_move);
                 break;
             }
             _ => {}
@@ -300,34 +295,26 @@ fn play_game(eval_tx: &Sender<EvalRequest>) -> Vec<SelfPlayItem> {
     }
 
     // ===== BUG FIX 2: Backpropagate ground truth to all positions =====
-    // Determine Z from the perspective of the side that played the LAST move
-    // game_records stores (fen, search_val, side_to_move_at_that_position)
-    // The last entry's side_to_move is the side that was about to play when the game ended.
-
-    let final_items: Vec<SelfPlayItem> = match result {
-        GameResult::Draw => {
-            // All positions get blended value: 0.5 * search + 0.5 * 0.0
+    let final_items: Vec<SelfPlayItem> = match winner {
+        None => {
+            // TRƯỜNG HỢP HÒA (Draw)
             game_records
                 .into_iter()
                 .map(|(fen, search_val, _side, policy)| SelfPlayItem {
                     fen,
-                    value: search_val * 0.5, // blend search with draw (0.0)
+                    value: search_val * 0.5, // blend search với điểm hòa (0.0)
                     policy,
                 })
                 .collect()
         }
-        GameResult::Win => {
-            // The side to move at the end of the game LOST (was checkmated).
-            // So the losing side is board.side_to_move (current, after the game loop).
-            let losing_side = board.side_to_move;
-
+        Some(winning_color) => {
+            // TRƯỜNG HỢP CÓ NGƯỜI CHIẾN THẮNG
             game_records
                 .into_iter()
                 .map(|(fen, search_val, side, policy)| {
-                    // Z from this position's perspective:
-                    // If side == losing_side => Z = -1.0 (this position was losing)
-                    // If side != losing_side => Z = +1.0 (this position was winning)
-                    let z = if side == losing_side { -1.0 } else { 1.0 };
+                    // Nếu phe ở trạng thái này trùng với phe chiến thắng -> Z = +1.0 (Thắng)
+                    // Ngược lại -> Z = -1.0 (Thua)
+                    let z = if side == winning_color { 1.0 } else { -1.0 };
 
                     SelfPlayItem {
                         fen,

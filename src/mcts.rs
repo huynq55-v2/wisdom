@@ -219,7 +219,7 @@ impl MCTS {
                 s.spawn(|| {
                     let mut local_board = root_board.clone();
                     for _ in 0..(simulations / num_threads) {
-                        self.playout(&mut local_board, eval_tx);
+                        self.playout(root_board, &mut local_board, eval_tx);
                         local_board = root_board.clone();
                     }
                 });
@@ -276,7 +276,7 @@ impl MCTS {
         (best_move, metrics)
     }
 
-    fn playout(&self, board: &mut Board, eval_tx: &Sender<EvalRequest>) {
+    fn playout(&self, master_board: &Board, board: &mut Board, eval_tx: &Sender<EvalRequest>) {
         let mut path = Vec::with_capacity(64);
         let mut current_idx = 0;
         path.push(current_idx);
@@ -333,42 +333,26 @@ impl MCTS {
             path.push(best_child);
             current_idx = best_child;
 
-            // Track history: compute HistoryEntry for this move
             let m = Move(best_move_int);
-            let moving_side = board.side_to_move;
-            let is_capture = m.is_capture();
+            let is_capture = board.piece_at(m.to_sq()).is_some();
             let piece_opt = board.piece_at(m.from_sq());
             let is_reversible_check = if let Some(p) = piece_opt {
                 !is_capture
                     && (p.piece_type != PieceType::Pawn || {
-                        let (from_row, _) = Board::square_to_coord(m.from_sq());
-                        let (to_row, _) = Board::square_to_coord(m.to_sq());
+                        let (from_row, _) = crate::board::Board::square_to_coord(m.from_sq());
+                        let (to_row, _) = crate::board::Board::square_to_coord(m.to_sq());
                         from_row == to_row
                     })
             } else {
                 false
             };
 
-            let pre_threats = if is_reversible_check {
-                board.get_unprotected_threats(moving_side)
-            } else {
-                0
-            };
-
             board.make_move(m);
-
-            let gives_check = board.is_in_check(board.side_to_move);
-            let chased_set = if is_reversible_check && !gives_check {
-                let post_threats = board.get_unprotected_threats(moving_side);
-                post_threats & !pre_threats
-            } else {
-                0
-            };
 
             local_history.push(HistoryEntry {
                 hash: board.zobrist_key,
-                is_check: gives_check,
-                chased_set,
+                is_check: false, // LAZY EVALUATION
+                chased_set: 0,   // LAZY EVALUATION
                 is_reversible: is_reversible_check,
             });
         }
@@ -380,44 +364,87 @@ impl MCTS {
         // === REPETITION CHECK ===
         // Before evaluating with NN, check if current position is a repetition
         if local_history.len() >= 4 {
-            match board.judge_repetition(&local_history, local_history.len(), 1) {
-                RepetitionResult::Loss => {
-                    // Current side to move is perpetually chasing/checking → LOSE
-                    value = -1.0;
-                    // Skip expansion, go straight to backprop
-                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
-                    for &idx in path.iter().rev() {
-                        let node = &self.tree[idx];
-                        node.total_value
-                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
-                        current_val_i64 = -current_val_i64;
-                    }
-                    return;
+            let current_hash = local_history.last().unwrap().hash;
+            let mut rep_count = 0;
+            let mut loop_start_index = 0;
+
+            let mut h = local_history.len() as isize - 3;
+            while h >= 0 {
+                let entry = &local_history[h as usize];
+                if !entry.is_reversible {
+                    break;
                 }
-                RepetitionResult::Win => {
-                    value = 1.0;
-                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
-                    for &idx in path.iter().rev() {
-                        let node = &self.tree[idx];
-                        node.total_value
-                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
-                        current_val_i64 = -current_val_i64;
+                if entry.hash == current_hash {
+                    rep_count += 1;
+                    loop_start_index = h as usize;
+                    if rep_count >= 1 {
+                        break;
                     }
-                    return;
                 }
-                RepetitionResult::Draw => {
-                    value = 0.0;
-                    let mut current_val_i64 = (-value * 1_000_000.0) as i64;
-                    for &idx in path.iter().rev() {
-                        let node = &self.tree[idx];
-                        node.total_value
-                            .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
-                        current_val_i64 = -current_val_i64;
+                h -= 2;
+            }
+
+            if rep_count >= 1 {
+                // LAZY EVALUATION TRIGGERED: Recalculate chased_set & is_check for the cycle
+                let mut temp_board = master_board.clone();
+                for i in 0..local_history.len() {
+                    let m = Move(self.tree[path[i + 1]].get_move());
+
+                    if i >= loop_start_index {
+                        let moving_side = temp_board.side_to_move;
+                        let pre_threats = temp_board.get_unprotected_threats(moving_side);
+                        temp_board.make_move(m);
+
+                        let gives_check = temp_board.is_in_check(temp_board.side_to_move);
+                        let chased_set = if local_history[i].is_reversible && !gives_check {
+                            let post_threats = temp_board.get_unprotected_threats(moving_side);
+                            post_threats & !pre_threats
+                        } else {
+                            0
+                        };
+
+                        local_history[i].is_check = gives_check;
+                        local_history[i].chased_set = chased_set;
+                    } else {
+                        temp_board.make_move(m);
                     }
-                    return;
                 }
-                RepetitionResult::Undecided => {
-                    // Continue with normal evaluation
+
+                match temp_board.judge_repetition(&local_history, local_history.len(), 1) {
+                    RepetitionResult::Loss => {
+                        value = -1.0;
+                        let mut current_val_i64 = (-value * 1_000_000.0) as i64;
+                        for &idx in path.iter().rev() {
+                            let node = &self.tree[idx];
+                            node.total_value
+                                .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                            current_val_i64 = -current_val_i64;
+                        }
+                        return;
+                    }
+                    RepetitionResult::Win => {
+                        value = 1.0;
+                        let mut current_val_i64 = (-value * 1_000_000.0) as i64;
+                        for &idx in path.iter().rev() {
+                            let node = &self.tree[idx];
+                            node.total_value
+                                .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                            current_val_i64 = -current_val_i64;
+                        }
+                        return;
+                    }
+                    RepetitionResult::Draw => {
+                        value = 0.0;
+                        let mut current_val_i64 = (-value * 1_000_000.0) as i64;
+                        for &idx in path.iter().rev() {
+                            let node = &self.tree[idx];
+                            node.total_value
+                                .fetch_add(1_000_000 + current_val_i64, Ordering::AcqRel);
+                            current_val_i64 = -current_val_i64;
+                        }
+                        return;
+                    }
+                    RepetitionResult::Undecided => {}
                 }
             }
         }
