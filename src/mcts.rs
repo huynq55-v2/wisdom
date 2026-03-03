@@ -7,7 +7,7 @@ use crossbeam_channel::Sender;
 use rand_distr::{Dirichlet, Distribution};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
-pub const C_PUCT: f32 = 1.5;
+// pub const C_PUCT: f32 = 1.5;
 pub const VIRTUAL_LOSS: u32 = 1;
 
 pub struct AtomicMCTSNode {
@@ -320,6 +320,17 @@ impl MCTS {
             let parent_visits = std::cmp::max(1, node_visits) as f32;
             let sqrt_parent_visits = parent_visits.sqrt();
 
+            // Tối ưu: Dùng hằng số tĩnh tĩnh nếu nghĩ ít, dùng công thức động nếu nghĩ sâu
+            let c_puct = if parent_visits < 10000.0 {
+                // Tiết kiệm CPU cho quá trình Self-play (400 sim)
+                1.5
+            } else {
+                // Bung sức mạnh AlphaZero khi thi đấu / Inference
+                let c_init = 1.25f32;
+                let c_base = 19652.0f32;
+                c_init + ((parent_visits + c_base + 1.0) / c_base).ln()
+            };
+
             for i in 0..num_children {
                 let child_idx = start_idx as usize + i as usize;
                 let child = &self.tree[child_idx];
@@ -333,7 +344,7 @@ impl MCTS {
                 }
 
                 let prior = child.get_prior_prob();
-                let u = C_PUCT * prior * sqrt_parent_visits / (1.0 + cv);
+                let u = c_puct * prior * sqrt_parent_visits / (1.0 + cv);
                 let score = q + u;
 
                 if score > best_score {

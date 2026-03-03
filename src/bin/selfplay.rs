@@ -83,14 +83,72 @@ impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
         let mut targets_v_flat = Vec::with_capacity(batch_size);
         let mut targets_p_flat = Vec::with_capacity(batch_size);
 
+        let mut rng = rand::thread_rng();
+
         for item in items {
             let mut board = Board::new();
             wisdom::ucci::parse_fen(&mut board, &item.fen);
-            let tensor = board_to_tensor(&board);
+            let mut tensor = board_to_tensor(&board);
+
+            let mut policy_idx = item.policy; // Index thô tuyệt đối từ CSV
+            let is_black = board.side_to_move == Color::Black;
+
+            // ==========================================================
+            // BƯỚC 1: CHUẨN HÓA GÓC NHÌN (CANONICAL) NẾU PHE ĐEN ĐI
+            // ==========================================================
+            if is_black {
+                let from_dense = policy_idx / 90;
+                let to_dense = policy_idx % 90;
+
+                let f_row = from_dense / 9;
+                let f_col = from_dense % 9;
+                let t_row = to_dense / 9;
+                let t_col = to_dense % 9;
+
+                // Lật 180 độ (xoay mâm): hàng = 9 - hàng, cột = 8 - cột
+                let new_from = (9 - f_row) * 9 + (8 - f_col);
+                let new_to = (9 - t_row) * 9 + (8 - t_col);
+
+                policy_idx = new_from * 90 + new_to;
+            }
+
+            // ==========================================================
+            // BƯỚC 2: DATA AUGMENTATION (LẬT GƯƠNG NGANG 50-50)
+            // Lật đối xứng trái-phải cho cả Tensor và Policy
+            // ==========================================================
+            use rand::Rng;
+            if rng.gen_bool(0.5) {
+                // A. Lật Tensor Bàn Cờ theo chiều ngang
+                for plane in 0..14 {
+                    for r in 0..10 {
+                        for c in 0..4 {
+                            // Chỉ chạy c đến 4 (một nửa bàn) để swap
+                            let idx1 = plane * 90 + r * 9 + c;
+                            let idx2 = plane * 90 + r * 9 + (8 - c);
+                            tensor.swap(idx1, idx2);
+                        }
+                    }
+                }
+
+                // B. Lật Policy Index theo chiều ngang
+                let from_dense = policy_idx / 90;
+                let to_dense = policy_idx % 90;
+
+                let f_row = from_dense / 9;
+                let f_col = from_dense % 9;
+                let t_row = to_dense / 9;
+                let t_col = to_dense % 9;
+
+                // Lật gương ngang: Chỉ lật cột (cột = 8 - cột), giữ nguyên hàng
+                let flip_from = f_row * 9 + (8 - f_col);
+                let flip_to = t_row * 9 + (8 - t_col);
+
+                policy_idx = flip_from * 90 + flip_to;
+            }
 
             inputs_flat.extend_from_slice(&tensor);
             targets_v_flat.push(item.value);
-            targets_p_flat.push(item.policy as i32);
+            targets_p_flat.push(policy_idx as i32);
         }
 
         let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), &self.device)
@@ -255,7 +313,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
             board.to_fen(),
             normalized_score,
             current_side,
-            wisdom::nn::move_to_index_perspective(best_move, current_side),
+            wisdom::nn::move_to_index(best_move), // Lưu chính xác Index tuyệt đối của nước đi!
         ));
 
         let chosen_move = best_move;
