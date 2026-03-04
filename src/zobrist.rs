@@ -1,5 +1,6 @@
 pub struct Zobrist {
-    pub pieces: [[[u64; 90]; 7]; 2], // [Màu][Loại quân][Vị trí 0-89]
+    // [Color][Piece type][Square 0-89]
+    pub pieces: [[[u64; 90]; 7]; 2],
     pub side: u64,
 }
 
@@ -12,7 +13,7 @@ const fn pcg32(state: &mut u64) -> u64 {
     let rot = (oldstate >> 59) as u32;
     let v1 = (xorshifted >> rot) | (xorshifted << ((rot.wrapping_neg()) & 31));
 
-    // Gọi tiếp lần 2 để tạo 64-bit
+    // Run one more round to assemble a full 64-bit value.
     let oldstate = *state;
     *state = oldstate
         .wrapping_mul(6364136223846793005)

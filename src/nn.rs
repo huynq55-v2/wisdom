@@ -128,9 +128,9 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
 #[derive(Module, Debug)]
 pub struct ResBlock<B: Backend> {
     conv1: Conv2d<B>,
-    bn1: BatchNorm<B, 2>,
+    bn1: BatchNorm<B>,
     conv2: Conv2d<B>,
-    bn2: BatchNorm<B, 2>,
+    bn2: BatchNorm<B>,
     relu: Relu,
 }
 
@@ -179,7 +179,7 @@ impl ResBlockConfig {
 #[derive(Module, Debug)]
 pub struct XiangqiNet<B: Backend> {
     conv_input: Conv2d<B>,
-    bn_input: BatchNorm<B, 2>,
+    bn_input: BatchNorm<B>,
     res_blocks: Vec<ResBlock<B>>, // 7 ResBlocks
 
     conv_policy: Conv2d<B>,
@@ -263,6 +263,96 @@ impl<B: Backend> XiangqiNet<B> {
         let value = self.value_head.forward(x_val).tanh();
 
         (value, logits_policy)
+    }
+}
+
+// ============================================================
+// Training Support (for burn 0.20)
+// ============================================================
+
+use burn::train::{TrainStep, InferenceStep, TrainOutput};
+
+#[derive(Clone, Debug)]
+pub struct XiangqiTrainingOutput<B: Backend> {
+    pub loss: Tensor<B, 1>,
+    pub pred_value: Tensor<B, 2>,
+    pub targets_v: Tensor<B, 2>,
+}
+
+impl<B: Backend> burn::train::ItemLazy for XiangqiTrainingOutput<B> {
+    type ItemSync = Self;
+
+    fn sync(self) -> Self::ItemSync {
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct XiangqiTrainingBatch<B: Backend> {
+    pub inputs: Tensor<B, 4>,
+    pub targets_v: Tensor<B, 2>,
+    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
+}
+
+impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
+    type Input = XiangqiTrainingBatch<B>;
+    type Output = XiangqiTrainingOutput<B::InnerBackend>;
+
+    fn step(&self, batch: XiangqiTrainingBatch<B>) -> TrainOutput<XiangqiTrainingOutput<B::InnerBackend>> {
+        use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
+
+        let (pred_value, pred_policy) = self.forward(batch.inputs);
+
+        let loss_v = MseLoss::new().forward(
+            pred_value.clone(),
+            batch.targets_v.clone(),
+            burn::nn::loss::Reduction::Mean,
+        );
+
+        let loss_p = CrossEntropyLossConfig::new()
+            .init(&batch.targets_p.device())
+            .forward(pred_policy.clone(), batch.targets_p.clone());
+
+        let loss = loss_v + loss_p;
+
+        TrainOutput::new(
+            self,
+            loss.backward(),
+            XiangqiTrainingOutput {
+                loss: loss.inner(),
+                pred_value: pred_value.inner(),
+                targets_v: batch.targets_v.inner(),
+            },
+        )
+    }
+}
+
+impl<B: Backend> InferenceStep for XiangqiNet<B> {
+    type Input = XiangqiTrainingBatch<B>;
+    type Output = XiangqiTrainingOutput<B>;
+
+    fn step(&self, batch: XiangqiTrainingBatch<B>) -> XiangqiTrainingOutput<B> {
+        use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
+
+        let (pred_value, pred_policy) = self.forward(batch.inputs);
+
+        let loss_v = MseLoss::new().forward(
+            pred_value.clone(),
+            batch.targets_v.clone(),
+            burn::nn::loss::Reduction::Mean,
+        );
+
+        let loss_p = CrossEntropyLossConfig::new()
+            .init(&batch.targets_p.device())
+            .forward(pred_policy.clone(), batch.targets_p.clone());
+
+        let loss = loss_v + loss_p;
+
+        XiangqiTrainingOutput {
+            loss,
+            pred_value,
+            targets_v: batch.targets_v,
+        }
     }
 }
 

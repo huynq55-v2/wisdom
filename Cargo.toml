@@ -3,10 +3,12 @@ name = "wisdom"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+train = []
+
 [dependencies]
 macroquad = "0.4.14"
 burn = { version = "0.20", features = ["wgpu", "ndarray", "train"] }
-burn-import = "0.20"
 crossbeam-channel = "0.5"
 rand = "0.10"
 rand_distr = "0.6"

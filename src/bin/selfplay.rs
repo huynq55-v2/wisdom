@@ -6,11 +6,10 @@ use burn::{
         dataset::Dataset,
     },
     module::AutodiffModule,
-    nn::loss::{CrossEntropyLossConfig, MseLoss},
-    optim::{AdamConfig, decay::WeightDecayConfig},
+    optim::{AdamConfig, decay::WeightDecayConfig, lr_scheduler::constant::ConstantLr},
     prelude::*,
     record::Recorder,
-    train::{LearnerBuilder, RegressionOutput, TrainOutput, TrainStep, ValidStep},
+    train::{SupervisedTraining, Learner},
 };
 use crossbeam_channel::Sender;
 use std::fs::OpenOptions;
@@ -20,7 +19,7 @@ use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::mcts::MCTS;
 use wisdom::nn::board_to_tensor;
-use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig};
+use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig, XiangqiTrainingBatch};
 use wisdom::tt::TranspositionTable;
 
 // ==========================================================
@@ -47,23 +46,6 @@ impl Dataset<SelfPlayItem> for RAMDataset {
     }
 }
 
-#[derive(Debug)]
-pub struct XiangqiBatch<B: Backend> {
-    pub inputs: Tensor<B, 4>,
-    pub targets_v: Tensor<B, 2>,
-    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
-}
-
-impl<B: Backend> Clone for XiangqiBatch<B> {
-    fn clone(&self) -> Self {
-        Self {
-            inputs: self.inputs.clone(),
-            targets_v: self.targets_v.clone(),
-            targets_p: self.targets_p.clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct XiangqiBatcher<B: Backend> {
     device: B::Device,
@@ -75,15 +57,15 @@ impl<B: Backend> XiangqiBatcher<B> {
     }
 }
 
-impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
-    fn batch(&self, items: Vec<SelfPlayItem>) -> XiangqiBatch<B> {
+impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBatcher<B> {
+    fn batch(&self, items: Vec<SelfPlayItem>, device: &B::Device) -> XiangqiTrainingBatch<B> {
         let batch_size = items.len();
 
         let mut inputs_flat = Vec::with_capacity(batch_size * TENSOR_SIZE);
         let mut targets_v_flat = Vec::with_capacity(batch_size);
         let mut targets_p_flat = Vec::with_capacity(batch_size);
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for item in items {
             let mut board = Board::new();
@@ -116,8 +98,8 @@ impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
             // BƯỚC 2: DATA AUGMENTATION (LẬT GƯƠNG NGANG 50-50)
             // Lật đối xứng trái-phải cho cả Tensor và Policy
             // ==========================================================
-            use rand::Rng;
-            if rng.gen_bool(0.5) {
+            use rand::RngExt;
+            if rng.random_bool(0.5) {
                 // A. Lật Tensor Bàn Cờ theo chiều ngang
                 for plane in 0..14 {
                     for r in 0..10 {
@@ -151,77 +133,19 @@ impl<B: Backend> Batcher<SelfPlayItem, XiangqiBatch<B>> for XiangqiBatcher<B> {
             targets_p_flat.push(policy_idx as i32);
         }
 
-        let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), &self.device)
+        let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), device)
             .reshape([batch_size, NUM_PLANES, BOARD_H, BOARD_W]);
 
-        let targets_v = Tensor::<B, 1>::from_data(targets_v_flat.as_slice(), &self.device)
+        let targets_v = Tensor::<B, 1>::from_data(targets_v_flat.as_slice(), device)
             .reshape([batch_size, 1]);
 
         let targets_p =
-            Tensor::<B, 1, burn::tensor::Int>::from_data(targets_p_flat.as_slice(), &self.device);
+            Tensor::<B, 1, burn::tensor::Int>::from_data(targets_p_flat.as_slice(), device);
 
-        XiangqiBatch {
+        XiangqiTrainingBatch {
             inputs,
             targets_v,
             targets_p,
-        }
-    }
-}
-
-// ==========================================================
-// 2. Training Steps Implementation
-// ==========================================================
-
-impl<B: burn::tensor::backend::AutodiffBackend> TrainStep<XiangqiBatch<B>, RegressionOutput<B>>
-    for XiangqiNet<B>
-{
-    fn step(&self, batch: XiangqiBatch<B>) -> TrainOutput<RegressionOutput<B>> {
-        let (pred_value, pred_policy) = self.forward(batch.inputs);
-
-        let loss_v = MseLoss::new().forward(
-            pred_value.clone(),
-            batch.targets_v.clone(),
-            burn::nn::loss::Reduction::Mean,
-        );
-
-        let loss_p = CrossEntropyLossConfig::new()
-            .init(&batch.targets_p.device())
-            .forward(pred_policy.clone(), batch.targets_p.clone());
-
-        let loss = loss_v + loss_p;
-
-        TrainOutput::new(
-            self,
-            loss.backward(),
-            RegressionOutput {
-                loss,
-                output: pred_value,
-                targets: batch.targets_v,
-            },
-        )
-    }
-}
-
-impl<B: Backend> ValidStep<XiangqiBatch<B>, RegressionOutput<B>> for XiangqiNet<B> {
-    fn step(&self, batch: XiangqiBatch<B>) -> RegressionOutput<B> {
-        let (pred_value, pred_policy) = self.forward(batch.inputs);
-
-        let loss_v = MseLoss::new().forward(
-            pred_value.clone(),
-            batch.targets_v.clone(),
-            burn::nn::loss::Reduction::Mean,
-        );
-
-        let loss_p = CrossEntropyLossConfig::new()
-            .init(&batch.targets_p.device())
-            .forward(pred_policy.clone(), batch.targets_p.clone());
-
-        let loss = loss_v + loss_p;
-
-        RegressionOutput {
-            loss,
-            output: pred_value,
-            targets: batch.targets_v,
         }
     }
 }
@@ -277,7 +201,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         }
 
         // Check repetition before searching
-        let rep = board.judge_repetition(&history, move_count, 1);
+        let rep = board.judge_repetition(&history, history.len(), 1);
         match rep {
             wisdom::board::RepetitionResult::Draw => {
                 winner = None;
@@ -297,7 +221,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         // Chạy MCTS với 400 simulations và BẬT DIRICHLET NOISE (true)
         let simulations = 400;
         let (best_move, metrics) =
-            mcts.search_best_move(&board, simulations, eval_tx, &tt, 1, true);
+            mcts.search_best_move(&board, &history, simulations, eval_tx, &tt, 1, true);
 
         // ==========================================
         // THÊM 2 DÒNG NÀY ĐỂ BÁO HIỆU ĐÃ TÌM XONG 1 NƯỚC
@@ -607,7 +531,7 @@ fn main() {
 
         use rand::seq::SliceRandom;
         let mut train_dataset = dataset_snapshot;
-        train_dataset.shuffle(&mut rand::thread_rng());
+        train_dataset.shuffle(&mut rand::rng());
         let split_idx = (train_dataset.len() as f32 * 0.9) as usize;
         let train_data = train_dataset[0..split_idx].to_vec();
         let valid_data = train_dataset[split_idx..].to_vec();
@@ -616,18 +540,18 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(256) // Tùy chỉnh: có thể tăng lên 128/256 khi train
+            .batch_size(256)
             .shuffle(42)
             .num_workers(2)
+            .set_device(device.clone())
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
             .batch_size(256)
             .shuffle(42)
             .num_workers(2)
+            .set_device(device.clone())
             .build(RAMDataset { items: valid_data });
-
-        let optim = AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4)));
 
         // Lưu tạm Model
         model
@@ -646,15 +570,22 @@ fn main() {
         // ĐÃ FIX BUG LEARNER: Tạo thư mục learner RIÊNG BIỆT cho từng iteration
         let iter_learner_dir = format!("{}/learner_iter_{}", model_dir, iteration);
 
-        let learner = LearnerBuilder::new(&iter_learner_dir)
-            .with_file_checkpointer(burn::record::CompactRecorder::new())
-            .devices(vec![device.clone()])
-            .num_epochs(1) // Chạy 1 Epoch cho mỗi Iteration
-            .build(autodiff_model, optim.init(), 1e-4);
+        let learner = Learner::new(
+            autodiff_model,
+            AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).init(),
+            ConstantLr::new(1e-4),
+        );
 
-        let trained_autodiff_model = learner.fit(dataloader_train, dataloader_valid);
+        let training = SupervisedTraining::new(
+            &iter_learner_dir,
+            dataloader_train,
+            dataloader_valid,
+        )
+        .num_epochs(1);
 
-        model = trained_autodiff_model.valid();
+        let result = training.launch(learner);
+
+        model = result.model;
 
         // Xóa thư mục Learner tạm để giải phóng ổ cứng
         let _ = std::fs::remove_dir_all(&iter_learner_dir);

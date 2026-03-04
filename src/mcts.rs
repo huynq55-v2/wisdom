@@ -4,7 +4,7 @@ use crate::r#move::Move;
 
 use crate::tt::TranspositionTable;
 use crossbeam_channel::Sender;
-use rand_distr::{Dirichlet, Distribution};
+use rand_distr::{multi::Dirichlet, Distribution};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 // pub const C_PUCT: f32 = 1.5;
@@ -107,6 +107,7 @@ impl MCTS {
     pub fn search_best_move(
         &self,
         root_board: &Board,
+        game_history: &[HistoryEntry],
         simulations: usize,
         eval_tx: &Sender<EvalRequest>,
         tt: &TranspositionTable,
@@ -121,6 +122,16 @@ impl MCTS {
         self.tree[0].set_data(0, 1.0);
         self.next_node_idx.store(1, Ordering::SeqCst);
         let tt_age = tt.next_age();
+
+        // Chỉ giữ phần lịch sử còn có thể ảnh hưởng đến repetition/chasing
+        let mut last_irreversible_idx = 0;
+        for i in (0..game_history.len()).rev() {
+            if !game_history[i].is_reversible {
+                last_irreversible_idx = i + 1;
+                break;
+            }
+        }
+        let relevant_history = &game_history[last_irreversible_idx..];
 
         // Mở rộng Nút gốc (Root Expansion)
         let mut pseudo_moves = root_board.generate_captures();
@@ -192,8 +203,8 @@ impl MCTS {
             if add_noise && p_sparse.len() > 1 {
                 let alpha = vec![0.3; p_sparse.len()];
                 if let Ok(dirichlet) = Dirichlet::new(&alpha) {
-                    let mut rng = rand::thread_rng();
-                    let noise = dirichlet.sample(&mut rng);
+                    let mut rng = rand::rng();
+                    let noise: Vec<f64> = dirichlet.sample(&mut rng);
                     for i in 0..p_sparse.len() {
                         priors[i] = (1.0 - 0.25) * priors[i] + 0.25 * (noise[i] as f32);
                     }
@@ -217,7 +228,14 @@ impl MCTS {
         if num_threads == 1 {
             let mut local_board = root_board.clone();
             for _ in 0..simulations {
-                self.playout(root_board, &mut local_board, eval_tx, tt, tt_age);
+                self.playout(
+                    root_board,
+                    &mut local_board,
+                    eval_tx,
+                    tt,
+                    tt_age,
+                    relevant_history,
+                );
                 local_board = root_board.clone();
             }
         } else {
@@ -226,7 +244,14 @@ impl MCTS {
                     s.spawn(|| {
                         let mut local_board = root_board.clone();
                         for _ in 0..(simulations / num_threads) {
-                            self.playout(root_board, &mut local_board, eval_tx, tt, tt_age);
+                            self.playout(
+                                root_board,
+                                &mut local_board,
+                                eval_tx,
+                                tt,
+                                tt_age,
+                                relevant_history,
+                            );
                             local_board = root_board.clone();
                         }
                     });
@@ -291,13 +316,16 @@ impl MCTS {
         eval_tx: &Sender<EvalRequest>,
         tt: &TranspositionTable,
         tt_age: u16,
+        relevant_history: &[HistoryEntry],
     ) {
         let mut path = Vec::with_capacity(64);
         let mut current_idx = 0;
         path.push(current_idx);
 
         // Track history for repetition detection during playout
-        let mut local_history: Vec<HistoryEntry> = Vec::with_capacity(64);
+        let mut local_history: Vec<HistoryEntry> = Vec::with_capacity(relevant_history.len() + 64);
+        local_history.extend_from_slice(relevant_history);
+        let seed_len = relevant_history.len();
 
         // 1. SELECT (Đi từ Root xuống Leaf)
         loop {
@@ -413,24 +441,25 @@ impl MCTS {
             if rep_count >= 1 {
                 // LAZY EVALUATION TRIGGERED: Recalculate chased_set & is_check for the cycle
                 let mut temp_board = master_board.clone();
-                for i in 0..local_history.len() {
-                    let m = Move(self.tree[path[i + 1]].get_move());
+                for step in 0..(path.len() - 1) {
+                    let m = Move(self.tree[path[step + 1]].get_move());
+                    let hist_idx = seed_len + step;
 
-                    if i >= loop_start_index {
+                    if hist_idx >= loop_start_index {
                         let moving_side = temp_board.side_to_move;
                         let pre_threats = temp_board.get_unprotected_threats(moving_side);
                         temp_board.make_move(m);
 
                         let gives_check = temp_board.is_in_check(temp_board.side_to_move);
-                        let chased_set = if local_history[i].is_reversible && !gives_check {
+                        let chased_set = if local_history[hist_idx].is_reversible && !gives_check {
                             let post_threats = temp_board.get_unprotected_threats(moving_side);
                             post_threats & !pre_threats
                         } else {
                             0
                         };
 
-                        local_history[i].is_check = gives_check;
-                        local_history[i].chased_set = chased_set;
+                        local_history[hist_idx].is_check = gives_check;
+                        local_history[hist_idx].chased_set = chased_set;
                     } else {
                         temp_board.make_move(m);
                     }
