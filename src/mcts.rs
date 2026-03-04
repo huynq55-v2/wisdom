@@ -120,6 +120,7 @@ impl MCTS {
         self.tree[0].num_children.store(0, Ordering::Release);
         self.tree[0].set_data(0, 1.0);
         self.next_node_idx.store(1, Ordering::SeqCst);
+        let tt_age = tt.next_age();
 
         // Mở rộng Nút gốc (Root Expansion)
         let mut pseudo_moves = root_board.generate_captures();
@@ -136,8 +137,8 @@ impl MCTS {
         }
 
         // Đánh giá Root: Lấy mảng Nén (Sparse Policy)
-        let (p_sparse, _v) = if let Some(tt_data) = tt.probe(root_board.zobrist_key) {
-            (tt_data.policy.clone(), tt_data.value)
+        let p_sparse = if let Some(tt_data) = tt.probe(root_board.zobrist_key) {
+            tt_data.policy_slice().to_vec()
         } else {
             let tensor = crate::nn::board_to_tensor(root_board);
             let (tx, rx) = crossbeam_channel::bounded(1);
@@ -160,8 +161,8 @@ impl MCTS {
                 })
                 .collect();
 
-            tt.record(root_board.zobrist_key, val, sparse.clone());
-            (sparse, val)
+            tt.record(root_board.zobrist_key, val, &sparse, tt_age);
+            sparse
         };
 
         if let Some(start_idx) = self.allocate_children(p_sparse.len() as u32) {
@@ -216,7 +217,7 @@ impl MCTS {
         if num_threads == 1 {
             let mut local_board = root_board.clone();
             for _ in 0..simulations {
-                self.playout(root_board, &mut local_board, eval_tx, tt);
+                self.playout(root_board, &mut local_board, eval_tx, tt, tt_age);
                 local_board = root_board.clone();
             }
         } else {
@@ -225,7 +226,7 @@ impl MCTS {
                     s.spawn(|| {
                         let mut local_board = root_board.clone();
                         for _ in 0..(simulations / num_threads) {
-                            self.playout(root_board, &mut local_board, eval_tx, tt);
+                            self.playout(root_board, &mut local_board, eval_tx, tt, tt_age);
                             local_board = root_board.clone();
                         }
                     });
@@ -289,6 +290,7 @@ impl MCTS {
         board: &mut Board,
         eval_tx: &Sender<EvalRequest>,
         tt: &TranspositionTable,
+        tt_age: u16,
     ) {
         let mut path = Vec::with_capacity(64);
         let mut current_idx = 0;
@@ -500,7 +502,7 @@ impl MCTS {
                 let p_sparse;
                 if let Some(tt_data) = tt.probe(board.zobrist_key) {
                     value = tt_data.value;
-                    p_sparse = tt_data.policy.clone();
+                    p_sparse = tt_data.policy_slice().to_vec();
                 } else {
                     // Ta đã khóa được Node! Gọi GPU đánh giá
                     let tensor = crate::nn::board_to_tensor(board);
@@ -526,7 +528,7 @@ impl MCTS {
                         })
                         .collect();
 
-                    tt.record(board.zobrist_key, value, p_sparse.clone());
+                    tt.record(board.zobrist_key, value, &p_sparse, tt_age);
                 }
 
                 // Cấp phát con từ mảng p_sparse
