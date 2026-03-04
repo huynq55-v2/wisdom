@@ -1,4 +1,4 @@
-use crate::board::{Board, Color, Piece, PieceType};
+use crate::board::{Board, Color, HistoryEntry, Piece, PieceType};
 use crate::eval_queue::EvalQueue;
 use crate::mcts::MCTS;
 use crate::r#move::Move;
@@ -113,12 +113,54 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
     board.compute_zobrist_key();
 }
 
+/// Builds a `HistoryEntry` for a given move and applies it to the board.
+/// This is the single source of truth for history construction logic used by
+/// both UCCI position parsing and GUI move application.
+fn apply_move_with_history(board: &mut Board, m: Move) -> HistoryEntry {
+    let is_capture = board.piece_at(m.to_sq()).is_some();
+    let piece = board.piece_at(m.from_sq()).unwrap();
+
+    let is_reversible = !is_capture
+        && (piece.piece_type != PieceType::Pawn || {
+            let (from_row, _) = Board::square_to_coord(m.from_sq());
+            let (to_row, _) = Board::square_to_coord(m.to_sq());
+            from_row == to_row // Tốt đi ngang (đã qua sông) => reversible
+        });
+
+    let moving_side = board.side_to_move;
+
+    let pre_threats = if is_reversible {
+        board.get_unprotected_threats(moving_side)
+    } else {
+        0
+    };
+
+    board.make_move(m);
+
+    let gives_check = board.is_in_check(board.side_to_move);
+
+    let chased_set = if is_reversible && !gives_check {
+        let post_threats = board.get_unprotected_threats(moving_side);
+        post_threats & !pre_threats
+    } else {
+        0
+    };
+
+    HistoryEntry {
+        hash: board.zobrist_key,
+        is_check: gives_check,
+        chased_set,
+        is_reversible,
+    }
+}
+
 pub fn ucci_loop_generic<B: burn::prelude::Backend>(
     model: crate::nn::XiangqiNet<B>,
     device: B::Device,
 ) {
     let mut board = Board::new();
     board.set_initial_position();
+    let mut game_history: Vec<HistoryEntry> = Vec::new();
 
     let tt = crate::tt::TranspositionTable::new(64);
 
@@ -127,7 +169,7 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
     // Store transmitter for MCTS
     let eval_tx = eval_queue.tx.clone();
 
-    let mcts = MCTS::new(2_000_000); // Pre-allocate 100k nodes
+    let mcts = MCTS::new(2_000_000); // Pre-allocate 2M nodes
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -163,11 +205,15 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
                         moves_idx = 8;
                     }
 
-                    // Apply moves
+                    // Reset history mỗi khi nhận lệnh position mới
+                    game_history.clear();
+
+                    // Apply moves và xây dựng HistoryEntry cho từng nước
                     if tokens.len() > moves_idx && tokens[moves_idx] == "moves" {
                         for move_str in &tokens[moves_idx + 1..] {
                             if let Some(m) = parse_ucci_move(&board, move_str) {
-                                board.make_move(m);
+                                let entry = apply_move_with_history(&mut board, m);
+                                game_history.push(entry);
                             }
                         }
                     }
@@ -186,9 +232,9 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
                     }
                 }
 
-                // Call MCTS Search instead of Alpha-Beta
+                // Call MCTS Search with full game history for repetition detection
                 let (best_move, metrics) =
-                    mcts.search_best_move(&board, &[], simulations, &eval_tx, &tt, 4, false);
+                    mcts.search_best_move(&board, &game_history, simulations, &eval_tx, &tt, 4, false);
 
                 // UCCI Info format: info depth 0 nodes {root_visits} score winpct {win_pct} pv {pv}
                 let mut pv_str = String::new();
