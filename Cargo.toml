@@ -5,14 +5,14 @@ edition = "2024"
 
 [dependencies]
 macroquad = "0.4.14"
-burn = { version = "0.16", features = ["wgpu", "ndarray", "train"] }
-burn-import = "0.16"
+burn = { version = "0.20", features = ["wgpu", "ndarray", "train"] }
+burn-import = "0.20"
 crossbeam-channel = "0.5"
-rand = "0.8"
-rand_distr = "0.4"
-burn-tch = "0.16"
+rand = "0.10"
+rand_distr = "0.6"
+burn-tch = "0.20"
 walkdir = "2.5.0"
-safetensors = "0.4"
+safetensors = "0.7"
 serde_json = "1.0"
 parking_lot = "0.12.5"
 
