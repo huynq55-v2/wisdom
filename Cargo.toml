@@ -26,15 +26,9 @@ path = "src/bin/gui.rs"
 name = "selfplay"
 path = "src/bin/selfplay.rs"
 
-
-
 [[bin]]
 name = "build_dataset"
 path = "src/bin/build_dataset.rs"
-
-[[bin]]
-name = "augment"
-path = "src/bin/augment.rs"
 
 [[bin]]
 name = "inspect"

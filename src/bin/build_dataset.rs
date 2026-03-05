@@ -33,9 +33,8 @@ fn clean_fen(fen: &str) -> String {
 
 /// Map score về khoảng [-1.0, 1.0]
 fn map_score(eval_cp: f32) -> f32 {
-    let max_cp = 2000.0;
-    let score = eval_cp / max_cp;
-    score.clamp(-1.0, 1.0)
+    // khong map vi script python da map roi
+    return eval_cp;
 }
 
 fn main() -> io::Result<()> {
@@ -59,7 +58,7 @@ fn main() -> io::Result<()> {
     let mut lines = reader.lines();
 
     // Bỏ qua dòng đầu tiên (Header)
-    // if let Some(_) = lines.next() {}
+    if let Some(_) = lines.next() {}
 
     let mut count = 0;
     for line in lines {

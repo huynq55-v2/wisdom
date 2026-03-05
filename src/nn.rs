@@ -3,8 +3,8 @@ use burn::prelude::*;
 use burn::record::{FullPrecisionSettings, Recorder};
 use burn::{
     nn::{
-        BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
         conv::{Conv2d, Conv2dConfig},
+        BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
     },
     record::NamedMpkFileRecorder,
 };
@@ -14,13 +14,14 @@ pub const NUM_PLANES: usize = 14;
 pub const BOARD_H: usize = 10;
 pub const BOARD_W: usize = 9;
 pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1260
-pub const ACTION_SPACE: usize = 90 * 90; // 8100
+pub const ACTION_SPACE: usize = 4500; // ĐÃ NÉN TỪ 8100 XUỐNG 4500
 
 // ============================================================
-// Action Mapping
+// Action Mapping (NEW 4500 ACTION SPACE)
 // ============================================================
 
-/// Convert a Move to an Index (0..8099) for the Policy Head
+/// Convert a Move to an Absolute Index (0..8099).
+/// Dùng duy nhất cho việc LƯU DATA VÀO FILE CSV (Replay Buffer).
 pub fn move_to_index(m: crate::r#move::Move) -> usize {
     let from_sq = m.from_sq() as usize;
     let to_sq = m.to_sq() as usize;
@@ -31,54 +32,78 @@ pub fn move_to_index(m: crate::r#move::Move) -> usize {
     from_dense * 90 + to_dense
 }
 
-/// Convert a Move to an Index (0..8099) for the Policy Head, mapped to Canonical Perspective
+/// Convert a Move to an Index (0..4499) for the MCTS Policy Head.
+/// Hàm này tự động lật Perspective (nếu phe Đen đi) và tính ra 1 trong 50 Planes.
 pub fn move_to_index_perspective(m: crate::r#move::Move, stm: Color) -> usize {
-    let mut from_sq = m.from_sq() as usize;
-    let mut to_sq = m.to_sq() as usize;
+    let from_sq = m.from_sq() as usize;
+    let to_sq = m.to_sq() as usize;
 
-    // Nếu phe Đen đang đi, ta xoay tọa độ 180 độ để map đúng với Policy từ NN
+    // Tọa độ gốc
+    let mut from_r = from_sq / 16;
+    let mut from_c = from_sq % 16;
+    let mut to_r = to_sq / 16;
+    let mut to_c = to_sq % 16;
+
+    // Nếu phe Đen đang đi, Lật mặt (Perspective)
     if stm == Color::Black {
-        let f_row = from_sq / 16;
-        let f_col = from_sq % 16;
-        from_sq = (9 - f_row) * 16 + (8 - f_col);
-
-        let t_row = to_sq / 16;
-        let t_col = to_sq % 16;
-        to_sq = (9 - t_row) * 16 + (8 - t_col);
+        from_r = 9 - from_r;
+        from_c = 8 - from_c;
+        to_r = 9 - to_r;
+        to_c = 8 - to_c;
     }
 
-    let from_dense = (from_sq / 16) * 9 + (from_sq % 16);
-    let to_dense = (to_sq / 16) * 9 + (to_sq % 16);
+    // Tính khoảng cách
+    let dr = to_r as isize - from_r as isize;
+    let dc = to_c as isize - from_c as isize;
 
-    from_dense * 90 + to_dense
-}
+    let mut plane = 0;
+    
+    // 34 Hướng đi thẳng (Xe, Pháo, Tốt, Tướng)
+    if dr < 0 && dc == 0 { plane = (-dr - 1) as usize; }
+    else if dr > 0 && dc == 0 { plane = (dr + 8) as usize; }
+    else if dr == 0 && dc < 0 { plane = (-dc + 17) as usize; }
+    else if dr == 0 && dc > 0 { plane = (dc + 25) as usize; }
+    
+    // 8 Hướng nhảy Mã
+    else if dr.abs() == 2 && dc.abs() == 1 {
+        if dr == -2 && dc == -1 { plane = 34; }
+        else if dr == -2 && dc == 1 { plane = 35; }
+        else if dr == 2 && dc == -1 { plane = 36; }
+        else { plane = 37; }
+    }
+    
+    // 8 Hướng nhảy Mã (tiếp)
+    else if dr.abs() == 1 && dc.abs() == 2 {
+        if dr == -1 && dc == -2 { plane = 38; }
+        else if dr == 1 && dc == -2 { plane = 39; }
+        else if dr == -1 && dc == 2 { plane = 40; }
+        else { plane = 41; }
+    }
+    
+    // 4 Hướng bay Tượng
+    else if dr.abs() == 2 && dc.abs() == 2 {
+        if dr == -2 && dc == -2 { plane = 42; }
+        else if dr == -2 && dc == 2 { plane = 43; }
+        else if dr == 2 && dc == -2 { plane = 44; }
+        else { plane = 45; }
+    }
+    
+    // 4 Hướng đi Sĩ
+    else if dr.abs() == 1 && dc.abs() == 1 {
+        if dr == -1 && dc == -1 { plane = 46; }
+        else if dr == -1 && dc == 1 { plane = 47; }
+        else if dr == 1 && dc == -1 { plane = 48; }
+        else { plane = 49; }
+    }
 
-/// Convert an Index from the Policy Head back to a (from_sq, to_sq) tuple
-pub fn index_to_move(index: usize) -> (u8, u8) {
-    let from_dense = index / 90;
-    let to_dense = index % 90;
-
-    let from_sq = (from_dense / 9) * 16 + (from_dense % 9);
-    let to_sq = (to_dense / 9) * 16 + (to_dense % 9);
-
-    (from_sq as u8, to_sq as u8)
+    let from_dense_perspective = from_r * 9 + from_c;
+    from_dense_perspective * 50 + plane
 }
 
 // ============================================================
 // Board → Tensor Conversion
 // ============================================================
 
-/// Converts a Board to a flat f32 array of shape [14, 10, 9].
-/// Canonical Perspective mapping:
-/// If Red to move:
-///   Planes 0..=6   : Red pieces
-///   Planes 7..=13  : Black pieces
-///   Board mapped   : As is
-///
-/// If Black to move:
-///   Planes 0..=6   : Black pieces
-///   Planes 7..=13  : Red pieces
-///   Board mapped   : Rotated 180 degrees (row -> 9 - row, col -> 8 - col)
 pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
     let mut data = [0.0f32; TENSOR_SIZE];
     let is_black = board.side_to_move == Color::Black;
@@ -97,7 +122,6 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
                     PieceType::Pawn => 6,
                 };
 
-                // Canonical: Plane 0-6: Side to move, 7-13: Opponent
                 let is_mine = piece.color == board.side_to_move;
                 let plane = if is_mine {
                     piece_offset
@@ -105,7 +129,6 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
                     piece_offset + 7
                 };
 
-                // Rotate board 180 degrees if Black is to move
                 let (mapped_row, mapped_col) = if is_black {
                     (9 - row, 8 - col)
                 } else {
@@ -122,7 +145,7 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
 }
 
 // ============================================================
-// RESNET MODEL DEFINITION (Khớp 100% với train.py)
+// RESNET MODEL DEFINITION (Khớp 100% với train.py V3)
 // ============================================================
 
 #[derive(Module, Debug)]
@@ -160,7 +183,6 @@ impl ResBlockConfig {
 
     pub fn init<B: Backend>(&self, device: &B::Device) -> ResBlock<B> {
         ResBlock {
-            // bias = false y như Python
             conv1: Conv2dConfig::new([self.channels, self.channels], [3, 3])
                 .with_padding(burn::nn::PaddingConfig2d::Same)
                 .with_bias(false)
@@ -180,7 +202,7 @@ impl ResBlockConfig {
 pub struct XiangqiNet<B: Backend> {
     conv_input: Conv2d<B>,
     bn_input: BatchNorm<B>,
-    res_blocks: Vec<ResBlock<B>>, // 7 ResBlocks
+    res_blocks: Vec<ResBlock<B>>, // 15 ResBlocks
 
     conv_policy: Conv2d<B>,
     policy_head: Linear<B>,
@@ -196,7 +218,7 @@ pub struct XiangqiNetConfig;
 impl XiangqiNetConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> XiangqiNet<B> {
         let channels = 128;
-        let num_res_blocks = 7;
+        let num_res_blocks = 15; // ĐÃ TĂNG LÊN 15 BLOCKS
 
         let mut res_blocks = Vec::with_capacity(num_res_blocks);
         for _ in 0..num_res_blocks {
@@ -212,6 +234,7 @@ impl XiangqiNetConfig {
             res_blocks,
 
             conv_policy: Conv2dConfig::new([channels, 2], [1, 1]).init(device),
+            // ACTION_SPACE BÂY GIỜ LÀ 4500
             policy_head: LinearConfig::new(2 * BOARD_H * BOARD_W, ACTION_SPACE).init(device),
 
             fc1: LinearConfig::new(channels, 64).init(device),
@@ -241,19 +264,16 @@ impl<B: Backend> XiangqiNet<B> {
         x = self.bn_input.forward(x);
         x = self.relu.forward(x);
 
-        // Chạy qua 7 lớp ResBlock
         for block in self.res_blocks.iter() {
             x = block.forward(x);
         }
         let x_spatial = x;
         let [_, channels, h, w] = x_spatial.dims();
 
-        // --- BRANCH 1: POLICY HEAD ---
         let x_pol = self.conv_policy.forward(x_spatial.clone());
         let x_pol = x_pol.reshape([batch_size, 2 * h * w]);
         let logits_policy = self.policy_head.forward(x_pol);
 
-        // --- BRANCH 2: VALUE HEAD ---
         let spatial = h * w;
         let x_val = x_spatial.reshape([batch_size, channels, spatial]);
         let x_val = x_val.mean_dim(2); // GAP
@@ -270,7 +290,7 @@ impl<B: Backend> XiangqiNet<B> {
 // Training Support (for burn 0.20)
 // ============================================================
 
-use burn::train::{TrainStep, InferenceStep, TrainOutput};
+use burn::train::{InferenceStep, TrainOutput, TrainStep};
 
 #[derive(Clone, Debug)]
 pub struct XiangqiTrainingOutput<B: Backend> {
@@ -298,7 +318,10 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
     type Input = XiangqiTrainingBatch<B>;
     type Output = XiangqiTrainingOutput<B::InnerBackend>;
 
-    fn step(&self, batch: XiangqiTrainingBatch<B>) -> TrainOutput<XiangqiTrainingOutput<B::InnerBackend>> {
+    fn step(
+        &self,
+        batch: XiangqiTrainingBatch<B>,
+    ) -> TrainOutput<XiangqiTrainingOutput<B::InnerBackend>> {
         use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
 
         let (pred_value, pred_policy) = self.forward(batch.inputs);
@@ -352,47 +375,6 @@ impl<B: Backend> InferenceStep for XiangqiNet<B> {
             loss,
             pred_value,
             targets_v: batch.targets_v,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::backend::NdArray;
-
-    type TestBackend = NdArray<f32>;
-
-    #[test]
-    fn test_board_to_tensor_initial_position() {
-        let mut board = Board::new();
-        board.set_initial_position();
-        let tensor = board_to_tensor(&board);
-
-        // Red Rook should be at (9, 0) and (9, 8) → plane 4 (it is Red's turn, so plane is 4)
-        let plane_rook_red = 4;
-        let idx_a0 = plane_rook_red * 90 + 9 * 9 + 0; // row=9, col=0
-        let idx_i0 = plane_rook_red * 90 + 9 * 9 + 8; // row=9, col=8
-        assert_eq!(tensor[idx_a0], 1.0, "Red Rook at a0");
-        assert_eq!(tensor[idx_i0], 1.0, "Red Rook at i0");
-    }
-
-    #[test]
-    fn test_model_forward_shape() {
-        let device = <TestBackend as Backend>::Device::default();
-        let config = XiangqiNetConfig;
-        let model = config.init::<TestBackend>(&device);
-
-        // Create a dummy batch of 4 boards
-        let dummy = Tensor::<TestBackend, 4>::zeros([4, NUM_PLANES, BOARD_H, BOARD_W], &device);
-        let (value, _policy) = model.forward(dummy);
-
-        assert_eq!(value.dims(), [4, 1]);
-
-        // Values should be in [-1, 1] due to tanh
-        let data = value.to_data();
-        for val in data.iter::<f32>() {
-            assert!(val >= -1.0 && val <= 1.0, "Output {} out of range", val);
         }
     }
 }

@@ -2,16 +2,16 @@ use burn::record::NamedMpkFileRecorder;
 use burn::{
     backend::{Autodiff, Wgpu},
     data::{
-        dataloader::{DataLoaderBuilder, batcher::Batcher},
+        dataloader::{batcher::Batcher, DataLoaderBuilder},
         dataset::Dataset,
     },
-    module::AutodiffModule,
-    optim::{AdamConfig, decay::WeightDecayConfig, lr_scheduler::constant::ConstantLr},
+    optim::{decay::WeightDecayConfig, AdamConfig},
     prelude::*,
-    record::Recorder,
-    train::{SupervisedTraining, Learner, renderer::CliMetricsRenderer},
+    train::{renderer::CliMetricsRenderer, Learner, SupervisedTraining},
+    record::Recorder, // BẮT BUỘC PHẢI IMPORT ĐỂ DÙNG HÀM .load()
 };
 use crossbeam_channel::Sender;
+use rand::RngExt;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,9 @@ use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::mcts::MCTS;
 use wisdom::nn::board_to_tensor;
-use wisdom::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet, XiangqiNetConfig, XiangqiTrainingBatch};
+use wisdom::nn::{
+    XiangqiNetConfig, XiangqiTrainingBatch, BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE,
+};
 use wisdom::tt::TranspositionTable;
 
 // ==========================================================
@@ -29,8 +31,8 @@ use wisdom::tt::TranspositionTable;
 #[derive(Clone, Debug)]
 pub struct SelfPlayItem {
     pub fen: String,
-    pub value: f32,    // -1.0 to 1.0
-    pub policy: usize, // best move index
+    pub value: f32,
+    pub policy: usize,
 }
 
 pub struct RAMDataset {
@@ -72,65 +74,80 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
             wisdom::ucci::parse_fen(&mut board, &item.fen);
             let mut tensor = board_to_tensor(&board);
 
-            let mut policy_idx = item.policy; // Index thô tuyệt đối từ CSV
+            let absolute_idx = item.policy; // 0..8099
             let is_black = board.side_to_move == Color::Black;
 
-            // ==========================================================
-            // BƯỚC 1: CHUẨN HÓA GÓC NHÌN (CANONICAL) NẾU PHE ĐEN ĐI
-            // ==========================================================
+            let from_dense = absolute_idx / 90;
+            let to_dense = absolute_idx % 90;
+
+            let mut from_r = from_dense / 9;
+            let mut from_c = from_dense % 9;
+            let mut to_r = to_dense / 9;
+            let mut to_c = to_dense % 9;
+
+            // 1. LẬT PERSPECTIVE NẾU LÀ ĐEN
             if is_black {
-                let from_dense = policy_idx / 90;
-                let to_dense = policy_idx % 90;
-
-                let f_row = from_dense / 9;
-                let f_col = from_dense % 9;
-                let t_row = to_dense / 9;
-                let t_col = to_dense % 9;
-
-                // Lật 180 độ (xoay mâm): hàng = 9 - hàng, cột = 8 - cột
-                let new_from = (9 - f_row) * 9 + (8 - f_col);
-                let new_to = (9 - t_row) * 9 + (8 - t_col);
-
-                policy_idx = new_from * 90 + new_to;
+                from_r = 9 - from_r;
+                from_c = 8 - from_c;
+                to_r = 9 - to_r;
+                to_c = 8 - to_c;
             }
 
-            // ==========================================================
-            // BƯỚC 2: DATA AUGMENTATION (LẬT GƯƠNG NGANG 50-50)
-            // Lật đối xứng trái-phải cho cả Tensor và Policy
-            // ==========================================================
-            use rand::RngExt;
-            if rng.random_bool(0.5) {
-                // A. Lật Tensor Bàn Cờ theo chiều ngang
+            // 2. DATA AUGMENTATION: LẬT GƯƠNG NGANG
+            if rng.random_bool(0.5) { // Sửa .gen_bool() thành .random_bool() cho tương thích rand 0.9
                 for plane in 0..14 {
                     for r in 0..10 {
                         for c in 0..4 {
-                            // Chỉ chạy c đến 4 (một nửa bàn) để swap
                             let idx1 = plane * 90 + r * 9 + c;
                             let idx2 = plane * 90 + r * 9 + (8 - c);
                             tensor.swap(idx1, idx2);
                         }
                     }
                 }
-
-                // B. Lật Policy Index theo chiều ngang
-                let from_dense = policy_idx / 90;
-                let to_dense = policy_idx % 90;
-
-                let f_row = from_dense / 9;
-                let f_col = from_dense % 9;
-                let t_row = to_dense / 9;
-                let t_col = to_dense % 9;
-
-                // Lật gương ngang: Chỉ lật cột (cột = 8 - cột), giữ nguyên hàng
-                let flip_from = f_row * 9 + (8 - f_col);
-                let flip_to = t_row * 9 + (8 - t_col);
-
-                policy_idx = flip_from * 90 + flip_to;
+                from_c = 8 - from_c;
+                to_c = 8 - to_c;
             }
+
+            // 3. TÍNH ACTION SPACE 4500
+            let dr = to_r as isize - from_r as isize;
+            let dc = to_c as isize - from_c as isize;
+
+            let mut plane = 0;
+            if dr < 0 && dc == 0 { plane = (-dr - 1) as usize; }
+            else if dr > 0 && dc == 0 { plane = (dr + 8) as usize; }
+            else if dr == 0 && dc < 0 { plane = (-dc + 17) as usize; }
+            else if dr == 0 && dc > 0 { plane = (dc + 25) as usize; }
+            else if dr.abs() == 2 && dc.abs() == 1 {
+                if dr == -2 && dc == -1 { plane = 34; }
+                else if dr == -2 && dc == 1 { plane = 35; }
+                else if dr == 2 && dc == -1 { plane = 36; }
+                else { plane = 37; }
+            }
+            else if dr.abs() == 1 && dc.abs() == 2 {
+                if dr == -1 && dc == -2 { plane = 38; }
+                else if dr == 1 && dc == -2 { plane = 39; }
+                else if dr == -1 && dc == 2 { plane = 40; }
+                else { plane = 41; }
+            }
+            else if dr.abs() == 2 && dc.abs() == 2 {
+                if dr == -2 && dc == -2 { plane = 42; }
+                else if dr == -2 && dc == 2 { plane = 43; }
+                else if dr == 2 && dc == -2 { plane = 44; }
+                else { plane = 45; }
+            }
+            else if dr.abs() == 1 && dc.abs() == 1 {
+                if dr == -1 && dc == -1 { plane = 46; }
+                else if dr == -1 && dc == 1 { plane = 47; }
+                else if dr == 1 && dc == -1 { plane = 48; }
+                else { plane = 49; }
+            }
+
+            let from_dense_perspective = from_r * 9 + from_c;
+            let compact_policy_idx = from_dense_perspective * 50 + plane;
 
             inputs_flat.extend_from_slice(&tensor);
             targets_v_flat.push(item.value);
-            targets_p_flat.push(policy_idx as i32);
+            targets_p_flat.push(compact_policy_idx as i32);
         }
 
         let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), device)
@@ -171,13 +188,11 @@ fn get_all_legal_moves(board: &mut Board) -> Vec<wisdom::r#move::Move> {
     legal_moves
 }
 
-/// Play a single self-play game. Returns Vec<(FEN, value)> with ground-truth-blended values.
 fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec<SelfPlayItem> {
     let mut board = Board::new();
     board.set_initial_position();
     let mut history = Vec::new();
 
-    // Store (fen, search_value, side_to_move_at_that_position, policy_index)
     let mut game_records: Vec<(String, f32, Color, usize)> = Vec::new();
     let mut move_count = 0;
     let winner: Option<Color>;
@@ -200,7 +215,6 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
             break;
         }
 
-        // Check repetition before searching
         let rep = board.judge_repetition(&history, history.len(), 1);
         match rep {
             wisdom::board::RepetitionResult::Draw => {
@@ -218,18 +232,13 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
             _ => {}
         }
 
-        // Chạy MCTS với 400 simulations và BẬT DIRICHLET NOISE (true)
         let simulations = 400;
         let (best_move, metrics) =
             mcts.search_best_move(&board, &history, simulations, eval_tx, &tt, 1, true);
 
-        // ==========================================
-        // THÊM 2 DÒNG NÀY ĐỂ BÁO HIỆU ĐÃ TÌM XONG 1 NƯỚC
         print!(".");
         let _ = std::io::stdout().flush();
-        // ==========================================
 
-        // Quy đổi win_pct [0..100] về dải [-1.0 .. 1.0] làm Search Value
         let normalized_score = (metrics.win_pct / 50.0) - 1.0;
         let current_side = board.side_to_move;
 
@@ -237,13 +246,10 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
             board.to_fen(),
             normalized_score,
             current_side,
-            wisdom::nn::move_to_index(best_move), // Lưu chính xác Index tuyệt đối của nước đi!
+            wisdom::nn::move_to_index(best_move), // Giữ nguyên Index tuyệt đối
         ));
 
         let chosen_move = best_move;
-
-        // ===== TỐI ƯU LOGIC LUẬT CỜ =====
-        // Rút gọn logic để tính HistoryEntry phục vụ luật Repetition cờ tướng
         let is_capture = board.piece_at(chosen_move.to_sq()).is_some();
         let piece = board.piece_at(chosen_move.from_sq()).unwrap();
 
@@ -280,36 +286,26 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         move_count += 1;
     }
 
-    // ===== BUG FIX 2: Backpropagate ground truth to all positions =====
     let final_items: Vec<SelfPlayItem> = match winner {
-        None => {
-            // TRƯỜNG HỢP HÒA (Draw)
-            game_records
-                .into_iter()
-                .map(|(fen, search_val, _side, policy)| SelfPlayItem {
+        None => game_records
+            .into_iter()
+            .map(|(fen, search_val, _side, policy)| SelfPlayItem {
+                fen,
+                value: search_val * 0.5,
+                policy,
+            })
+            .collect(),
+        Some(winning_color) => game_records
+            .into_iter()
+            .map(|(fen, search_val, side, policy)| {
+                let z = if side == winning_color { 1.0 } else { -1.0 };
+                SelfPlayItem {
                     fen,
-                    value: search_val * 0.5, // blend search với điểm hòa (0.0)
+                    value: search_val * 0.5 + z * 0.5,
                     policy,
-                })
-                .collect()
-        }
-        Some(winning_color) => {
-            // TRƯỜNG HỢP CÓ NGƯỜI CHIẾN THẮNG
-            game_records
-                .into_iter()
-                .map(|(fen, search_val, side, policy)| {
-                    // Nếu phe ở trạng thái này trùng với phe chiến thắng -> Z = +1.0 (Thắng)
-                    // Ngược lại -> Z = -1.0 (Thua)
-                    let z = if side == winning_color { 1.0 } else { -1.0 };
-
-                    SelfPlayItem {
-                        fen,
-                        value: search_val * 0.5 + z * 0.5, // blend 50% search + 50% ground truth
-                        policy,
-                    }
-                })
-                .collect()
-        }
+                }
+            })
+            .collect(),
     };
 
     final_items
@@ -329,177 +325,47 @@ fn main() {
     let model_dir = "./wisdom_models";
     std::fs::create_dir_all(model_dir).expect("Failed to create models directory");
 
-    // TÌM CHECKPOINT MỚI NHẤT
-    let mut start_iteration = 0;
+    let mut start_version = 0;
     if let Ok(entries) = std::fs::read_dir(model_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().into_string().unwrap_or_default();
-            if fname.starts_with("xiangqi_net_ckpt_") {
-                if let Some(num_str) = fname.strip_prefix("xiangqi_net_ckpt_") {
-                    let num_part = num_str.split('.').next().unwrap_or("");
-                    if let Ok(num) = num_part.parse::<usize>() {
-                        start_iteration = start_iteration.max(num);
+            if fname.starts_with("xiangqi_net_version_") && fname.ends_with(".mpk") {
+                if let Some(num_str) = fname
+                    .strip_prefix("xiangqi_net_version_")
+                    .and_then(|s| s.strip_suffix(".mpk"))
+                {
+                    if let Ok(num) = num_str.parse::<usize>() {
+                        start_version = start_version.max(num);
                     }
                 }
             }
         }
     }
 
-    let checkpoint_path = if start_iteration > 0 {
-        format!("{}/xiangqi_net_ckpt_{}", model_dir, start_iteration)
+    let checkpoint_path = if start_version > 0 {
+        format!("{}/xiangqi_net_version_{}.mpk", model_dir, start_version)
     } else {
-        format!("{}/xiangqi_net_latest", model_dir)
+        format!("{}/xiangqi_net_base.mpk", model_dir)
     };
 
-    let temp_transfer_path = format!("{}/temp_transfer", model_dir);
+    println!("📥 Loading base model from '{}'...", checkpoint_path);
+    // SỬA LỖI RECORD LOAD Ở ĐÂY
+    let record = NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default()
+        .load(checkpoint_path.clone().into(), &device)
+        .unwrap_or_else(|_| panic!("❌ Failed to load model from {}. Vui lòng đổi tên file Kaggle thành xiangqi_net_base.mpk", checkpoint_path));
 
-    // CỐ GẮNG LOAD MODEL CŨ
-    let record_result =
-        burn::record::CompactRecorder::new().load(checkpoint_path.clone().into(), &device);
-
-    let mut model = match record_result {
-        Ok(record) => {
-            println!(
-                "✅ Found existing checkpoint! Loading model from '{}'...",
-                checkpoint_path
-            );
-            config.init::<MyBackend>(&device).load_record(record)
-        }
-        Err(_) => {
-            println!("⚠️ No checkpoint found or failed to load. Checking for replay_buffer.csv to do a bootstrap training run...");
-
-            // Kiểm tra xem có file replay_buffer.csv không
-            let bootstrap_buffer_path = format!("{}/replay_buffer.csv", model_dir);
-            let bootstrap_items = if let Ok(file) = std::fs::File::open(&bootstrap_buffer_path) {
-                println!("📂 Found replay_buffer.csv, loading data for bootstrap training...");
-                let reader = BufReader::new(file);
-                let mut items = Vec::new();
-                for line in reader.lines().map_while(|l| l.ok()) {
-                    let parts: Vec<&str> = line.split(',').collect();
-                    if parts.len() == 3 {
-                        if let (Ok(value), Ok(policy)) =
-                            (parts[1].parse::<f32>(), parts[2].parse::<usize>())
-                        {
-                            items.push(SelfPlayItem {
-                                fen: parts[0].to_string(),
-                                value,
-                                policy,
-                            });
-                        }
-                    }
-                }
-                println!("✅ Loaded {} records for bootstrap training.", items.len());
-                items
-            } else {
-                println!("ℹ️ No replay_buffer.csv found. Initializing a NEW random model...");
-                Vec::new()
-            };
-
-            let new_model = config.init::<MyBackend>(&device);
-
-            // Nếu có data thì bootstrap train trước
-            if !bootstrap_items.is_empty() {
-                println!("🚀 Starting bootstrap training on {} positions before self-play...", bootstrap_items.len());
-
-                use rand::seq::SliceRandom;
-                let mut shuffled = bootstrap_items;
-                shuffled.shuffle(&mut rand::rng());
-
-                let split_idx = (shuffled.len() as f32 * 0.9) as usize;
-                let train_data = shuffled[0..split_idx].to_vec();
-                let valid_data = shuffled[split_idx..].to_vec();
-
-                let batcher_train = XiangqiBatcher::<MyAutodiffBackend>::new(device.clone());
-                let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
-
-                let dataloader_train = DataLoaderBuilder::new(batcher_train)
-                    .batch_size(256)
-                    .shuffle(42)
-                    .num_workers(2)
-                    .set_device(device.clone())
-                    .build(RAMDataset { items: train_data });
-
-                let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-                    .batch_size(256)
-                    .shuffle(42)
-                    .num_workers(2)
-                    .set_device(device.clone())
-                    .build(RAMDataset { items: valid_data });
-
-                let bootstrap_ckpt_path = format!("{}/bootstrap_transfer", model_dir);
-                new_model
-                    .clone()
-                    .save_file(&bootstrap_ckpt_path, &burn::record::CompactRecorder::new())
-                    .expect("Failed to save bootstrap transfer model");
-
-                let record = burn::record::CompactRecorder::new()
-                    .load(bootstrap_ckpt_path.clone().into(), &device)
-                    .expect("Failed to load bootstrap transfer model");
-
-                let autodiff_model = config
-                    .init::<MyAutodiffBackend>(&device)
-                    .load_record(record);
-
-                let bootstrap_learner_dir = format!("{}/learner_bootstrap", model_dir);
-                let learner = Learner::new(
-                    autodiff_model,
-                    AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).init(),
-                    ConstantLr::new(1e-4),
-                );
-
-                let training = SupervisedTraining::new(
-                    &bootstrap_learner_dir,
-                    dataloader_train,
-                    dataloader_valid,
-                )
-                .num_epochs(3)
-                .renderer(CliMetricsRenderer::new());
-
-                let result = training.launch(learner);
-                let trained_model = result.model;
-
-                // Xóa thư mục learner tạm
-                let _ = std::fs::remove_dir_all(&bootstrap_learner_dir);
-
-                // Lưu checkpoint bootstrap (iteration 0)
-                let bootstrap_final_path = format!("{}/xiangqi_net_ckpt_0", model_dir);
-                trained_model
-                    .clone()
-                    .save_file(&bootstrap_final_path, &burn::record::CompactRecorder::new())
-                    .expect("Failed to save bootstrap checkpoint");
-
-                let bootstrap_mpk_path = format!("{}/xiangqi_net_0", model_dir);
-                trained_model
-                    .clone()
-                    .save_file(
-                        &bootstrap_mpk_path,
-                        &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
-                    )
-                    .expect("Failed to save bootstrap mpk model");
-
-                println!("✅ Bootstrap training complete! Model saved to '{}.mpk'", bootstrap_mpk_path);
-                start_iteration = 0; // Selfplay sẽ đánh số từ iteration 1 tiếp theo
-
-                trained_model
-            } else {
-                new_model
-            }
-        }
-    };
+    let mut model = config.init::<MyBackend>(&device).load_record(record);
 
     let num_iterations = 500;
     let games_per_iteration = 1280;
-    let concurrent_games = 128; // Tối ưu: Bằng đúng batch_size của EvalQueue
+    let concurrent_games = 128;
 
-    // Khởi tạo TT 1 lần duy nhất, cấp 1024 MB (1 GB) dùng chung cho cả 128 luồng
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
-    // CẤU TRÚC LƯU TRỮ CHIA SẺ (Thread-safe)
-    let max_buffer_size = 2_000_000;
+    let max_buffer_size = 5_000_000;
     let mut initial_buffer: Vec<SelfPlayItem> = Vec::new();
     let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
-    // Nạp lại dữ liệu cũ nếu có
     if let Ok(file) = std::fs::File::open(&buffer_path) {
         println!("Đang nạp data từ {}...", buffer_path);
         let reader = BufReader::new(file);
@@ -523,10 +389,7 @@ fn main() {
         );
     }
 
-    // Đưa Buffer vào Arc<Mutex> để các thread có thể ghi trực tiếp
     let replay_buffer_arc = Arc::new(Mutex::new(initial_buffer));
-
-    // Mở file ở chế độ Ghi nối tiếp (Append) và đưa vào Arc<Mutex>
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -535,16 +398,15 @@ fn main() {
     let file_arc = Arc::new(Mutex::new(BufWriter::new(file)));
 
     for iter in 1..=num_iterations {
-        let iteration = start_iteration + iter;
+        let version = start_version + iter;
         println!("============================================================");
         println!(
-            " Iteration {} / {} - Generating Data (CPU-MCTS + GPU-NN Batched)",
-            iteration, num_iterations
+            " Version {} / {} - Generating Data (CPU-MCTS + GPU-NN Batched)",
+            version, num_iterations
         );
         println!("============================================================");
 
-        // GENERATION PHASE
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1); // GPU chạy infer batch 64
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1);
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -555,51 +417,32 @@ fn main() {
                 games_per_iteration - batch_idx * concurrent_games,
             );
 
-            let start_game = batch_idx * concurrent_games + 1;
-            println!(
-                "  Batch {}/{}: games {}-{}... (Spawning {} CPU threads)",
-                batch_idx + 1,
-                total_batches,
-                start_game,
-                start_game + games_in_batch - 1,
-                games_in_batch
-            );
-            std::io::stdout().flush().unwrap();
-
             std::thread::scope(|s| {
-                for game_i in 0..games_in_batch {
+                for _ in 0..games_in_batch {
                     let tx = &eval_tx;
                     let rb_clone = Arc::clone(&replay_buffer_arc);
                     let file_clone = Arc::clone(&file_arc);
                     let tt_clone = Arc::clone(&shared_tt);
 
                     s.spawn(move || {
-                        // Chạy 1 ván cờ (Tốn thời gian)
                         let records = play_game(tx, &tt_clone);
-                        let len = records.len();
 
-                        // 1. CẬP NHẬT NGAY VÀO RAM BUFFER
                         {
                             let mut rb = rb_clone.lock().unwrap();
                             rb.extend(records.clone());
                         }
 
-                        // 2. GHI NỐI TIẾP NGAY VÀO FILE Ổ CỨNG (Append)
                         {
                             let mut f = file_clone.lock().unwrap();
                             for item in &records {
                                 let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
                             }
                         }
-
-                        print!("g{}({}) ", game_i + 1, len);
-                        let _ = std::io::stdout().flush();
                     });
                 }
             });
             println!();
 
-            // XẢ TOÀN BỘ DATA CỦA BATCH XUỐNG Ổ CỨNG TRONG 1 LẦN DUY NHẤT
             {
                 let mut f = file_arc.lock().unwrap();
                 let _ = f.flush();
@@ -610,15 +453,13 @@ fn main() {
         drop(eval_queue);
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
-        // KIỂM TRA VÀ CẮT TỈA (TRIM) BUFFER NẾU VƯỢT QUÁ GIỚI HẠN
         {
             let mut rb = replay_buffer_arc.lock().unwrap();
             if rb.len() > max_buffer_size {
                 let excess = rb.len() - max_buffer_size;
-                rb.drain(0..excess); // Xóa data cũ nhất ở đầu
+                rb.drain(0..excess);
                 println!("Đã cắt tỉa {} bản ghi cũ khỏi Replay Buffer.", excess);
 
-                // Vì đã xóa data cũ, ta phải Ghi đè (Overwrite) lại toàn bộ file CSV
                 let mut f = file_arc.lock().unwrap();
                 *f = BufWriter::new(std::fs::File::create(&buffer_path).unwrap());
                 for item in rb.iter() {
@@ -628,24 +469,26 @@ fn main() {
             }
         }
 
-        // TRAINING PHASE
         let dataset_snapshot = {
             let rb = replay_buffer_arc.lock().unwrap();
-            rb.clone() // Clone ra để nhả Lock, giúp train không khóa mất biến
+            rb.clone()
         };
-
-        println!("============================================================");
-        println!(
-            " Iteration {} / {} - Training Model on {} positions",
-            iteration,
-            num_iterations,
-            dataset_snapshot.len()
-        );
-        println!("============================================================");
 
         use rand::seq::SliceRandom;
         let mut train_dataset = dataset_snapshot;
         train_dataset.shuffle(&mut rand::rng());
+        
+        let sample_size = train_dataset.len().min(250_000);
+        train_dataset.truncate(sample_size);
+
+        println!("============================================================");
+        println!(
+            " Version {} - Training Model on {} sampled positions",
+            version,
+            train_dataset.len()
+        );
+        println!("============================================================");
+
         let split_idx = (train_dataset.len() as f32 * 0.9) as usize;
         let train_data = train_dataset[0..split_idx].to_vec();
         let valid_data = train_dataset[split_idx..].to_vec();
@@ -667,13 +510,17 @@ fn main() {
             .set_device(device.clone())
             .build(RAMDataset { items: valid_data });
 
-        // Lưu tạm Model
+        let temp_transfer_path = format!("{}/temp_transfer", model_dir);
         model
             .clone()
-            .save_file(&temp_transfer_path, &burn::record::CompactRecorder::new())
+            .save_file(
+                &temp_transfer_path,
+                &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
+            )
             .expect("Failed to save temp transfer model");
 
-        let record = burn::record::CompactRecorder::new()
+        // SỬA LỖI RECORD LOAD LẦN 2
+        let record = NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default()
             .load(temp_transfer_path.clone().into(), &device)
             .expect("Failed to load temp transfer model");
 
@@ -681,9 +528,9 @@ fn main() {
             .init::<MyAutodiffBackend>(&device)
             .load_record(record);
 
-        // ĐÃ FIX BUG LEARNER: Tạo thư mục learner RIÊNG BIỆT cho từng iteration
-        let iter_learner_dir = format!("{}/learner_iter_{}", model_dir, iteration);
+        let iter_learner_dir = format!("{}/learner_version_{}", model_dir, version);
 
+        use burn::optim::lr_scheduler::constant::ConstantLr;
         let learner = Learner::new(
             autodiff_model,
             AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).init(),
@@ -702,18 +549,9 @@ fn main() {
 
         model = result.model;
 
-        // Xóa thư mục Learner tạm để giải phóng ổ cứng
         let _ = std::fs::remove_dir_all(&iter_learner_dir);
 
-        // 4. CHECKPOINTING CHUẨN ĐƯỜNG DẪN TÁCH RỜI TỪNG ITERATION
-        let new_ckpt_path = format!("{}/xiangqi_net_ckpt_{}", model_dir, iteration);
-        model
-            .clone()
-            .save_file(&new_ckpt_path, &burn::record::CompactRecorder::new())
-            .expect("Failed to save model");
-
-        // 5. LƯU MODEL DƯỚI DẠNG NATIVE MPK CHO ENGINE/GUI
-        let final_mpk_path = format!("{}/xiangqi_net_{}", model_dir, iteration);
+        let final_mpk_path = format!("{}/xiangqi_net_version_{}", model_dir, version);
         model
             .clone()
             .save_file(
@@ -723,8 +561,8 @@ fn main() {
             .expect("Failed to save mpk model");
 
         println!(
-            "Iteration {} completed. Model saved to {}.mpk",
-            iteration, final_mpk_path
+            "✅ Version {} completed. Model saved to {}.mpk",
+            version, final_mpk_path
         );
     }
 
