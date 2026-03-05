@@ -59,7 +59,7 @@ fn main() -> io::Result<()> {
     let mut lines = reader.lines();
 
     // Bỏ qua dòng đầu tiên (Header)
-    if let Some(_) = lines.next() {}
+    // if let Some(_) = lines.next() {}
 
     let mut count = 0;
     for line in lines {

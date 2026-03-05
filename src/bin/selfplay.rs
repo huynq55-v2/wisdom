@@ -9,7 +9,7 @@ use burn::{
     optim::{AdamConfig, decay::WeightDecayConfig, lr_scheduler::constant::ConstantLr},
     prelude::*,
     record::Recorder,
-    train::{SupervisedTraining, Learner},
+    train::{SupervisedTraining, Learner, renderer::CliMetricsRenderer},
 };
 use crossbeam_channel::Sender;
 use std::fs::OpenOptions;
@@ -366,15 +366,129 @@ fn main() {
             config.init::<MyBackend>(&device).load_record(record)
         }
         Err(_) => {
-            println!(
-                "⚠️ No checkpoint found or failed to load. Initializing a NEW random model..."
-            );
-            config.init::<MyBackend>(&device)
+            println!("⚠️ No checkpoint found or failed to load. Checking for replay_buffer.csv to do a bootstrap training run...");
+
+            // Kiểm tra xem có file replay_buffer.csv không
+            let bootstrap_buffer_path = format!("{}/replay_buffer.csv", model_dir);
+            let bootstrap_items = if let Ok(file) = std::fs::File::open(&bootstrap_buffer_path) {
+                println!("📂 Found replay_buffer.csv, loading data for bootstrap training...");
+                let reader = BufReader::new(file);
+                let mut items = Vec::new();
+                for line in reader.lines().map_while(|l| l.ok()) {
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() == 3 {
+                        if let (Ok(value), Ok(policy)) =
+                            (parts[1].parse::<f32>(), parts[2].parse::<usize>())
+                        {
+                            items.push(SelfPlayItem {
+                                fen: parts[0].to_string(),
+                                value,
+                                policy,
+                            });
+                        }
+                    }
+                }
+                println!("✅ Loaded {} records for bootstrap training.", items.len());
+                items
+            } else {
+                println!("ℹ️ No replay_buffer.csv found. Initializing a NEW random model...");
+                Vec::new()
+            };
+
+            let new_model = config.init::<MyBackend>(&device);
+
+            // Nếu có data thì bootstrap train trước
+            if !bootstrap_items.is_empty() {
+                println!("🚀 Starting bootstrap training on {} positions before self-play...", bootstrap_items.len());
+
+                use rand::seq::SliceRandom;
+                let mut shuffled = bootstrap_items;
+                shuffled.shuffle(&mut rand::rng());
+
+                let split_idx = (shuffled.len() as f32 * 0.9) as usize;
+                let train_data = shuffled[0..split_idx].to_vec();
+                let valid_data = shuffled[split_idx..].to_vec();
+
+                let batcher_train = XiangqiBatcher::<MyAutodiffBackend>::new(device.clone());
+                let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
+
+                let dataloader_train = DataLoaderBuilder::new(batcher_train)
+                    .batch_size(256)
+                    .shuffle(42)
+                    .num_workers(2)
+                    .set_device(device.clone())
+                    .build(RAMDataset { items: train_data });
+
+                let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
+                    .batch_size(256)
+                    .shuffle(42)
+                    .num_workers(2)
+                    .set_device(device.clone())
+                    .build(RAMDataset { items: valid_data });
+
+                let bootstrap_ckpt_path = format!("{}/bootstrap_transfer", model_dir);
+                new_model
+                    .clone()
+                    .save_file(&bootstrap_ckpt_path, &burn::record::CompactRecorder::new())
+                    .expect("Failed to save bootstrap transfer model");
+
+                let record = burn::record::CompactRecorder::new()
+                    .load(bootstrap_ckpt_path.clone().into(), &device)
+                    .expect("Failed to load bootstrap transfer model");
+
+                let autodiff_model = config
+                    .init::<MyAutodiffBackend>(&device)
+                    .load_record(record);
+
+                let bootstrap_learner_dir = format!("{}/learner_bootstrap", model_dir);
+                let learner = Learner::new(
+                    autodiff_model,
+                    AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).init(),
+                    ConstantLr::new(1e-4),
+                );
+
+                let training = SupervisedTraining::new(
+                    &bootstrap_learner_dir,
+                    dataloader_train,
+                    dataloader_valid,
+                )
+                .num_epochs(3)
+                .renderer(CliMetricsRenderer::new());
+
+                let result = training.launch(learner);
+                let trained_model = result.model;
+
+                // Xóa thư mục learner tạm
+                let _ = std::fs::remove_dir_all(&bootstrap_learner_dir);
+
+                // Lưu checkpoint bootstrap (iteration 0)
+                let bootstrap_final_path = format!("{}/xiangqi_net_ckpt_0", model_dir);
+                trained_model
+                    .clone()
+                    .save_file(&bootstrap_final_path, &burn::record::CompactRecorder::new())
+                    .expect("Failed to save bootstrap checkpoint");
+
+                let bootstrap_mpk_path = format!("{}/xiangqi_net_0", model_dir);
+                trained_model
+                    .clone()
+                    .save_file(
+                        &bootstrap_mpk_path,
+                        &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
+                    )
+                    .expect("Failed to save bootstrap mpk model");
+
+                println!("✅ Bootstrap training complete! Model saved to '{}.mpk'", bootstrap_mpk_path);
+                start_iteration = 0; // Selfplay sẽ đánh số từ iteration 1 tiếp theo
+
+                trained_model
+            } else {
+                new_model
+            }
         }
     };
 
     let num_iterations = 500;
-    let games_per_iteration = 128;
+    let games_per_iteration = 1280;
     let concurrent_games = 128; // Tối ưu: Bằng đúng batch_size của EvalQueue
 
     // Khởi tạo TT 1 lần duy nhất, cấp 1024 MB (1 GB) dùng chung cho cả 128 luồng
@@ -581,7 +695,8 @@ fn main() {
             dataloader_train,
             dataloader_valid,
         )
-        .num_epochs(1);
+        .num_epochs(1)
+        .renderer(CliMetricsRenderer::new());
 
         let result = training.launch(learner);
 
