@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 from safetensors.torch import save_file
 import time
+import os
+import struct
 
 # =====================================================================
 # 1. HÀM CHUYỂN ĐỔI FEN SANG TENSOR VỚI PERSPECTIVE FIX
@@ -14,14 +16,14 @@ import time
 def fen_to_tensor(fen_str):
     parts = fen_str.split()
     board_part = parts[0]
-    stm = parts[1].lower() if len(parts) > 1 else 'w' 
+    stm = parts[1].lower() if len(parts) > 1 else 'w'
 
     tensor = np.zeros((14, 10, 9), dtype=np.float32)
     piece_map = {
         'K': 0, 'A': 1, 'E': 2, 'H': 3, 'R': 4, 'C': 5, 'P': 6,
         'k': 7, 'a': 8, 'e': 9, 'h': 10, 'r': 11, 'c': 12, 'p': 13
     }
-    
+
     # Render raw board first
     raw_board = np.full((10, 9), -1, dtype=np.int32)
     row, col = 0, 0
@@ -40,10 +42,10 @@ def fen_to_tensor(fen_str):
         for c in range(9):
             p = raw_board[r, c]
             if p == -1: continue
-            
+
             is_red = p <= 6
             piece_type = p if is_red else p - 7
-            
+
             if stm == 'w':
                 # Red to move: Red pieces on 0-6, Black on 7-13. No rotation.
                 plane = piece_type if is_red else piece_type + 7
@@ -63,9 +65,14 @@ def fen_to_tensor(fen_str):
 class XiangqiDataset(Dataset):
     def __init__(self, csv_file):
         print(f"Đang nạp dữ liệu từ {csv_file}...")
-        self.data = pd.read_csv(csv_file)
-        self.data['value'] = self.data['value'].astype(np.float32) + 0.0
-        print(f"Đã nạp {len(self.data)} ván cờ.")
+        # Đọc CSV không có header, chỉ định rõ kiểu dữ liệu
+        self.data = pd.read_csv(
+            csv_file,
+            header=None,
+            names=['fen', 'value', 'policy'],
+            dtype={'fen': str, 'value': np.float32, 'policy': np.int32}
+        )
+        print(f"Đã nạp {len(self.data)} positions.")
 
     def __len__(self):
         return len(self.data)
@@ -74,29 +81,42 @@ class XiangqiDataset(Dataset):
         row = self.data.iloc[idx]
         fen = row['fen']
         stm = fen.split()[1].lower() if len(fen.split()) > 1 else 'w'
-        
+
         board_tensor = fen_to_tensor(fen)
-        
+
         # Policy Fix: If Black to move, mirror the recorded move policy as well!
-        policy_idx = int(row['policy'])
+        try:
+            policy_idx = int(row['policy'])
+        except (ValueError, OverflowError):
+            # If policy value is corrupted, use 0 as fallback
+            policy_idx = 0
+
+        # Validate policy_idx is in valid range [0, 8099]
+        if policy_idx < 0 or policy_idx >= 8100:
+            policy_idx = 0
+
         if stm == 'b':
             from_dense = policy_idx // 90
             to_dense = policy_idx % 90
-            
+
             from_r, from_c = from_dense // 9, from_dense % 9
             to_r, to_c = to_dense // 9, to_dense % 9
-            
+
             # Mirror
             from_r, from_c = 9 - from_r, 8 - from_c
             to_r, to_c = 9 - to_r, 8 - to_c
-            
+
             mirrored_from = from_r * 9 + from_c
             mirrored_to = to_r * 9 + to_c
-            
+
             policy_idx = mirrored_from * 90 + mirrored_to
-            
+
         value = np.float32(row['value'])
-        return board_tensor, policy_idx, value
+        # Clamp value to valid range [-1, 1]
+        value = np.clip(value, -1.0, 1.0)
+
+        # Return as numpy types first, let PyTorch handle conversion
+        return board_tensor, np.int64(policy_idx), value
 
 # =====================================================================
 # 3. MODEL RESNET
@@ -123,10 +143,10 @@ class XiangqiNet(nn.Module):
         self.conv_input = nn.Conv2d(14, channels, kernel_size=3, padding=1, bias=False)
         self.bn_input = nn.BatchNorm2d(channels)
         self.res_blocks = nn.Sequential(*[ResBlock(channels) for _ in range(num_res_blocks)])
-        
+
         self.conv_policy = nn.Conv2d(channels, 2, kernel_size=1)
         self.policy_head = nn.Linear(2 * 10 * 9, 8100)
-        
+
         self.fc1 = nn.Linear(channels, 64)
         self.value_head = nn.Linear(64, 1)
 
@@ -134,29 +154,66 @@ class XiangqiNet(nn.Module):
         batch_size = x.size(0)
         x = F.relu(self.bn_input(self.conv_input(x)))
         x_spatial = self.res_blocks(x)
-        
+
         x_pol = self.conv_policy(x_spatial).view(batch_size, -1)
         logits_policy = self.policy_head(x_pol)
-        
+
         x_val = x_spatial.view(batch_size, 128, -1).mean(dim=2)
         x_val = F.relu(self.fc1(x_val))
         value = torch.tanh(self.value_head(x_val))
         return value, logits_policy
 
 # =====================================================================
-# 4. HÀM TRAIN & VALIDATION
+# 4. CONVERT TO MPK FORMAT (Burn MessagePack)
+# =====================================================================
+def save_to_mpk(model, output_path):
+    """
+    Convert PyTorch model to Burn's .mpk format
+    Format: MessagePack with named parameters
+    """
+    import msgpack
+
+    state_dict = model.state_dict()
+
+    # Convert to Burn's expected format
+    burn_dict = {}
+    for name, tensor in state_dict.items():
+        # Convert to numpy and then to list for msgpack
+        data = tensor.cpu().numpy()
+        burn_dict[name] = {
+            'data': data.flatten().tolist(),
+            'shape': list(data.shape),
+            'dtype': 'f32'  # float32
+        }
+
+    # Save as msgpack
+    with open(output_path, 'wb') as f:
+        packed = msgpack.packb(burn_dict, use_bin_type=True)
+        f.write(packed)
+
+    print(f"✅ Đã lưu model sang định dạng .mpk: {output_path}")
+
+# =====================================================================
+# 5. HÀM TRAIN & VALIDATION
 # =====================================================================
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Đang sử dụng thiết bị: {device}")
 
-    batch_size = 512
-    learning_rate = 1e-3
-    epochs = 8
+    batch_size = 256
+    learning_rate = 1e-4
+    epochs = 3  # Train 3 epoch như yêu cầu
 
-    full_dataset = XiangqiDataset("/kaggle/input/datasets/huyquang2309/xiangqi-mcts/xiangqi_dataset_cleaned.csv")
+    # Đọc từ replay_buffer.csv trong thư mục wisdom_models
+    csv_path = "./wisdom_models/replay_buffer.csv"
+    if not os.path.exists(csv_path):
+        print(f"❌ Không tìm thấy file {csv_path}")
+        print("Vui lòng chạy selfplay trước để tạo dữ liệu training!")
+        return
 
-    val_size = int(0.05 * len(full_dataset))
+    full_dataset = XiangqiDataset(csv_path)
+
+    val_size = int(0.1 * len(full_dataset))
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
@@ -164,50 +221,72 @@ def train_model():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     model = XiangqiNet().to(device)
-    # THÊM WEIGHT DECAY: Chống overfit cho model
+
+    # Thử load checkpoint nếu có
+    latest_ckpt = "./wisdom_models/xiangqi_net_python_latest.pth"
+    start_epoch = 0
+    if os.path.exists(latest_ckpt):
+        print(f"📂 Tìm thấy checkpoint, đang load từ {latest_ckpt}...")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0)
+        print(f"✅ Đã load model từ epoch {start_epoch}")
+
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    
+
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss()
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
         start_time = time.time()
+        total_loss = 0
+        total_loss_v = 0
+        total_loss_p = 0
+
         for batch_idx, (boards, target_policies, target_values) in enumerate(train_loader):
             boards, target_policies = boards.to(device), target_policies.to(device)
             target_values = target_values.to(device).unsqueeze(1)
 
             optimizer.zero_grad()
             pred_values, pred_policies = model(boards)
-            
+
             loss_v = mse_loss_fn(pred_values, target_values)
             loss_p = ce_loss_fn(pred_policies, target_policies)
-            
-            # 1. TĂNG TRỌNG SỐ CHO VALUE HEAD (Gấp 2 lần để ép mạng học Value)
-            value_weight = 2.0 
+
+            # Tăng trọng số cho Value Head
+            value_weight = 2.0
             loss = (value_weight * loss_v) + loss_p
 
             loss.backward()
             optimizer.step()
 
-            if (batch_idx + 1) % 500 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx+1}/{len(train_loader)}] | Loss: {loss.item():.4f} (Value: {loss_v.item():.4f}, Policy: {loss_p.item():.4f})")
+            total_loss += loss.item()
+            total_loss_v += loss_v.item()
+            total_loss_p += loss_p.item()
 
+            if (batch_idx + 1) % 100 == 0:
+                avg_loss = total_loss / (batch_idx + 1)
+                avg_loss_v = total_loss_v / (batch_idx + 1)
+                avg_loss_p = total_loss_p / (batch_idx + 1)
+                print(f"Epoch [{epoch+1}] Batch [{batch_idx+1}/{len(train_loader)}] | Loss: {avg_loss:.4f} (V: {avg_loss_v:.4f}, P: {avg_loss_p:.4f})")
+
+        # Validation
         model.eval()
         val_loss_v, val_loss_p = 0, 0
         correct_policy = 0
         total_samples = 0
-        
+
         with torch.no_grad():
             for boards, target_policies, target_values in val_loader:
                 boards, target_policies = boards.to(device), target_policies.to(device)
                 target_values = target_values.to(device).unsqueeze(1)
 
                 pred_values, pred_policies = model(boards)
-                
+
                 val_loss_v += mse_loss_fn(pred_values, target_values).item() * boards.size(0)
                 val_loss_p += ce_loss_fn(pred_policies, target_policies).item() * boards.size(0)
-                
+
                 _, predicted = torch.max(pred_policies, 1)
                 correct_policy += (predicted == target_policies).sum().item()
                 total_samples += boards.size(0)
@@ -215,27 +294,41 @@ def train_model():
         avg_val_v = val_loss_v / total_samples
         avg_val_p = val_loss_p / total_samples
         accuracy = (correct_policy / total_samples) * 100
-        
+
         epoch_time = time.time() - start_time
-        print(f"==> KẾT THÚC EPOCH {epoch+1}")
+        print(f"\n{'='*60}")
+        print(f"EPOCH {epoch+1} HOÀN TẤT")
+        print(f"{'='*60}")
         print(f"Train Time: {epoch_time:.2f}s")
         print(f"Val Value Loss: {avg_val_v:.4f} | Val Policy Loss: {avg_val_p:.4f}")
         print(f"Policy Accuracy (Top-1): {accuracy:.2f}%")
-        print("-" * 50)
 
-        # 2. LƯU MODEL NGAY SAU MỖI EPOCH VÀO Ổ CỨNG TRÁNH MẤT DATA
-        # Trích xuất State Dict sang CPU để lưu chuẩn safetensors
+        # Lưu checkpoint PyTorch
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+
+        checkpoint_path = f"./wisdom_models/xiangqi_net_python_epoch_{epoch+1}.pth"
+        torch.save(checkpoint, checkpoint_path)
+        torch.save(checkpoint, latest_ckpt)
+        print(f"✅ Đã lưu PyTorch checkpoint: {checkpoint_path}")
+
+        # Lưu safetensors
         state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
-        
-        checkpoint_name = f"xiangqi_net_epoch_{epoch+1}.safetensors"
-        latest_name = "xiangqi_net_weights_latest.safetensors"
-        
-        save_file(state_dict_cpu, checkpoint_name)
-        save_file(state_dict_cpu, latest_name)
-        print(f"✅ Đã lưu an toàn: {checkpoint_name} và {latest_name}")
-        print("=" * 50)
+        safetensors_path = f"./wisdom_models/xiangqi_net_python_epoch_{epoch+1}.safetensors"
+        save_file(state_dict_cpu, safetensors_path)
+        print(f"✅ Đã lưu safetensors: {safetensors_path}")
 
-    print("🎉 Hoàn tất toàn bộ quá trình huấn luyện!")
+        # Convert sang .mpk format cho Burn engine
+        mpk_path = f"./wisdom_models/xiangqi_net_python_{epoch+1}.mpk"
+        save_to_mpk(model, mpk_path)
+
+        print(f"{'='*60}\n")
+
+    print("🎉 Hoàn tất toàn bộ quá trình huấn luyện 3 epoch!")
+    print(f"\nĐể sử dụng model trong engine, dùng file .mpk mới nhất")
 
 if __name__ == "__main__":
     train_model()
