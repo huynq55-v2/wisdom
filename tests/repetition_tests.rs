@@ -26,8 +26,8 @@ fn parse_algebraic(board: &Board, alg: &str) -> wisdom::r#move::Move {
     let expected_piece_type = match p_char {
         'K' => PieceType::King,
         'A' => PieceType::Advisor,
-        'E' | 'B' => PieceType::Elephant,
-        'H' | 'N' => PieceType::Horse,
+        'B' => PieceType::Elephant,
+        'N' => PieceType::Horse,
         'R' => PieceType::Rook,
         'C' => PieceType::Cannon,
         'P' => PieceType::Pawn,

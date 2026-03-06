@@ -81,8 +81,8 @@ pub fn parse_fen(board: &mut Board, fen: &str) {
             let piece_type = match c.to_ascii_lowercase() {
                 'k' => PieceType::King,
                 'a' => PieceType::Advisor,
-                'b' | 'e' => PieceType::Elephant,
-                'n' | 'h' => PieceType::Horse,
+                'b' => PieceType::Elephant,
+                'n' => PieceType::Horse,
                 'r' => PieceType::Rook,
                 'c' => PieceType::Cannon,
                 'p' => PieceType::Pawn,
@@ -233,8 +233,15 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
                 }
 
                 // Call MCTS Search with full game history for repetition detection
-                let (best_move, metrics) =
-                    mcts.search_best_move(&board, &game_history, simulations, &eval_tx, &tt, 256, false);
+                let (best_move, metrics) = mcts.search_best_move(
+                    &board,
+                    &game_history,
+                    simulations,
+                    &eval_tx,
+                    &tt,
+                    256,
+                    false,
+                );
 
                 // UCCI Info format: info depth 0 nodes {root_visits} score winpct {win_pct} pv {pv}
                 let mut pv_str = String::new();

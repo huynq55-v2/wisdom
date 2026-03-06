@@ -157,8 +157,8 @@ impl Board {
                     let mut c = match piece.piece_type {
                         PieceType::King => 'K',
                         PieceType::Advisor => 'A',
-                        PieceType::Elephant => 'E',
-                        PieceType::Horse => 'H',
+                        PieceType::Elephant => 'B',
+                        PieceType::Horse => 'N',
                         PieceType::Rook => 'R',
                         PieceType::Cannon => 'C',
                         PieceType::Pawn => 'P',
@@ -184,6 +184,77 @@ impl Board {
             "b"
         };
         format!("{} {}", fen, stm)
+    }
+
+    /// Parse chuỗi FEN để tạo ra một Board mới
+    pub fn from_fen(fen: &str) -> Result<Self, String> {
+        let mut board = Board::new();
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err("Chuỗi FEN trống".to_string());
+        }
+
+        let board_part = parts[0];
+        let rows: Vec<&str> = board_part.split('/').collect();
+        if rows.len() != 10 {
+            return Err(format!(
+                "FEN không hợp lệ: Cần 10 hàng, nhưng có {}",
+                rows.len()
+            ));
+        }
+
+        // Parse vị trí các quân cờ
+        for (r, row_str) in rows.iter().enumerate() {
+            let mut c = 0;
+            for ch in row_str.chars() {
+                if let Some(digit) = ch.to_digit(10) {
+                    c += digit as usize;
+                } else {
+                    let color = if ch.is_lowercase() {
+                        Color::Black
+                    } else {
+                        Color::Red
+                    };
+                    let piece_type = match ch.to_ascii_lowercase() {
+                        'k' => PieceType::King,
+                        'a' => PieceType::Advisor,
+                        'b' => PieceType::Elephant,
+                        'n' => PieceType::Horse,
+                        'r' => PieceType::Rook,
+                        'c' => PieceType::Cannon,
+                        'p' => PieceType::Pawn,
+                        _ => return Err(format!("Ký tự không hợp lệ trong FEN: {}", ch)),
+                    };
+
+                    let sq = Self::coord_to_square(r, c);
+                    board.set_piece(sq, Some(Piece::new(piece_type, color)));
+
+                    // Cập nhật vị trí Tướng
+                    if piece_type == PieceType::King {
+                        if color == Color::Red {
+                            board.red_king_sq = sq;
+                        } else {
+                            board.black_king_sq = sq;
+                        }
+                    }
+                    c += 1;
+                }
+            }
+        }
+
+        // Parse lượt đi (nếu có)
+        if parts.len() > 1 {
+            board.side_to_move = match parts[1].to_lowercase().as_str() {
+                "b" => Color::Black,
+                "w" | "r" => Color::Red,
+                _ => return Err("Lượt đi không hợp lệ trong FEN".to_string()),
+            };
+        } else {
+            board.side_to_move = Color::Red;
+        }
+
+        board.compute_zobrist_key();
+        Ok(board)
     }
 
     /// Checks if a square index is strictly within the 10x9 board boundaries.

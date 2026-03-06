@@ -19,8 +19,8 @@ def fen_to_tensor(fen_str):
 
     tensor = np.zeros((14, 10, 9), dtype=np.float32)
     piece_map = {
-        'K': 0, 'A': 1, 'E': 2, 'H': 3, 'R': 4, 'C': 5, 'P': 6,
-        'k': 7, 'a': 8, 'e': 9, 'h': 10, 'r': 11, 'c': 12, 'p': 13
+        'K': 0, 'A': 1, 'B': 2, 'N': 3, 'R': 4, 'C': 5, 'P': 6,
+        'k': 7, 'a': 8, 'b': 9, 'n': 10, 'r': 11, 'c': 12, 'p': 13
     }
 
     raw_board = np.full((10, 9), -1, dtype=np.int32)

@@ -229,8 +229,8 @@ fn draw_pieces(
                 let text = match piece.piece_type {
                     PieceType::King => "K",
                     PieceType::Advisor => "A",
-                    PieceType::Elephant => "E",
-                    PieceType::Horse => "H",
+                    PieceType::Elephant => "B",
+                    PieceType::Horse => "N",
                     PieceType::Rook => "R",
                     PieceType::Cannon => "C",
                     PieceType::Pawn => "P",
