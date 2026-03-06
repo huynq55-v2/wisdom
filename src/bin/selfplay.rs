@@ -1,3 +1,4 @@
+use burn::backend::wgpu::WgpuDevice;
 use burn::record::NamedMpkFileRecorder;
 use burn::{
     backend::{Autodiff, Wgpu},
@@ -285,10 +286,10 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
 // ==========================================================
 
 fn main() {
-    type MyBackend = Wgpu;
+    type MyBackend = Wgpu<f32, i32>;
     type MyAutodiffBackend = Autodiff<MyBackend>;
 
-    let device = burn::backend::wgpu::WgpuDevice::default();
+    let device = WgpuDevice::default();
     let config = XiangqiNetConfig::new();
 
     let model_dir = "./wisdom_models";
@@ -326,12 +327,13 @@ fn main() {
     let mut model = config.init::<MyBackend>(&device).load_record(record);
 
     let num_iterations = 500;
-    let games_per_iteration = 640;
-    let concurrent_games = 128;
+    let games_per_iteration = 64;
+    let concurrent_games = 64;
+    let batch_size = 64;
 
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
-    let max_buffer_size = 5_000_000;
+    let max_buffer_size = 300_000;
     let mut initial_buffer: Vec<SelfPlayItem> = Vec::new();
     let buffer_path = format!("{}/replay_buffer.csv", model_dir);
 
@@ -375,10 +377,11 @@ fn main() {
         );
         println!("============================================================");
 
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 128, 1);
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), batch_size, 1);
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
+        let iter_records = Arc::new(Mutex::new(Vec::new()));
 
         for batch_idx in 0..total_batches {
             let games_in_batch = std::cmp::min(
@@ -392,6 +395,7 @@ fn main() {
                     let rb_clone = Arc::clone(&replay_buffer_arc);
                     let file_clone = Arc::clone(&file_arc);
                     let tt_clone = Arc::clone(&shared_tt);
+                    let iter_records_clone = Arc::clone(&iter_records);
 
                     s.spawn(move || {
                         let records = play_game(tx, &tt_clone);
@@ -406,6 +410,11 @@ fn main() {
                             for item in &records {
                                 let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
                             }
+                        }
+
+                        {
+                            let mut ir = iter_records_clone.lock().unwrap();
+                            ir.extend(records);
                         }
                     });
                 }
@@ -438,17 +447,22 @@ fn main() {
             }
         }
 
-        let dataset_snapshot = {
-            let rb = replay_buffer_arc.lock().unwrap();
-            rb.clone()
+        let mut train_dataset = {
+            let ir = iter_records.lock().unwrap();
+            ir.clone()
         };
 
         use rand::seq::SliceRandom;
-        let mut train_dataset = dataset_snapshot;
-        train_dataset.shuffle(&mut rand::rng());
+        let mut rb_snapshot = {
+            let rb = replay_buffer_arc.lock().unwrap();
+            rb.clone()
+        };
+        rb_snapshot.shuffle(&mut rand::rng());
 
-        let sample_size = train_dataset.len().min(500_000);
-        train_dataset.truncate(sample_size);
+        let samples_from_buffer = 25_000.min(rb_snapshot.len());
+        train_dataset.extend_from_slice(&rb_snapshot[0..samples_from_buffer]);
+
+        train_dataset.shuffle(&mut rand::rng());
 
         println!("============================================================");
         println!(
@@ -466,14 +480,14 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(256)
+            .batch_size(128)
             .shuffle(42)
             .num_workers(2)
             .set_device(device.clone())
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-            .batch_size(256)
+            .batch_size(128)
             .shuffle(42)
             .num_workers(2)
             .set_device(device.clone())
