@@ -1,23 +1,31 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 
-/// Lấy giá trị index của move theo Action Space của Neural Network (0..8099)
+/// Chuyển đổi nước đi dạng UCCI (vd: "h2e2") thành Index của Action Space (0..8099)
 fn get_move_index(best_move: &str) -> usize {
     let chars: Vec<char> = best_move.chars().collect();
+    if chars.len() < 4 {
+        return 0;
+    }
 
-    // UCCI: a0 là góc dưới bên trái (phe Đỏ).
-    // Hệ tọa độ của Board: Row 9 là phe Đỏ (bottom), Row 0 là phe Đen (top).
-    let from_col = chars[0] as usize - 'a' as usize;
-    let from_row = 9 - (chars[1] as usize - '0' as usize);
-    let to_col = chars[2] as usize - 'a' as usize;
-    let to_row = 9 - (chars[3] as usize - '0' as usize);
+    // 1. Trích xuất File (cột: a-i -> 0-8)
+    let from_file = (chars[0] as usize) - ('a' as usize);
+    let to_file = (chars[2] as usize) - ('a' as usize);
 
-    // Chuyển thẳng sang dense index (0..89)
-    let from_dense = from_row * 9 + from_col;
-    let to_dense = to_row * 9 + to_col;
+    // 2. Trích xuất Rank (hàng: 0-9).
+    // Trong UCCI, '0' là hàng đáy phe Đỏ.
+    // Trong Board array của bạn, Row 0 là đỉnh (phe Đen), Row 9 là đáy (phe Đỏ).
+    // Công thức: array_row = 9 - ucci_rank
+    let from_rank = 9 - ((chars[1] as usize) - ('0' as usize));
+    let to_rank = 9 - ((chars[3] as usize) - ('0' as usize));
 
-    // Trả về index của Action Space (0..8099)
-    from_dense * 90 + to_dense
+    // 3. Chuyển sang Square Index (0..89)
+    // Công thức: index = row * 9 + col
+    let from_sq90 = from_rank * 9 + from_file;
+    let to_sq90 = to_rank * 9 + to_file;
+
+    // 4. Trả về Action Index (0..8099)
+    from_sq90 * 90 + to_sq90
 }
 
 /// Loại bỏ các thành phần rườm rà phía sau của FEN

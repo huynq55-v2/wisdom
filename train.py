@@ -77,7 +77,14 @@ class XiangqiDataset(Dataset):
             names=['fen', 'value', 'policy'],
             dtype={'fen': str, 'value': np.float32, 'policy': np.int32}
         )
-        print(f"Đã nạp {len(self.data)} positions.")
+        # Lọc bỏ và không đưa vào training các mẫu có index < 0 hoặc >= 8100 
+        valid_mask = (self.data['policy'] >= 0) & (self.data['policy'] < 8100)
+        invalid_count = len(self.data) - valid_mask.sum()
+        self.data = self.data[valid_mask].reset_index(drop=True)
+        if invalid_count > 0:
+            print(f"Bỏ qua hoàn toàn {invalid_count} vị trí có action index không hợp lệ.")
+            
+        print(f"Đã nạp {len(self.data)} positions hợp lệ.")
 
     def __len__(self):
         return len(self.data)
@@ -87,15 +94,17 @@ class XiangqiDataset(Dataset):
         fen = row['fen']
         stm = fen.split()[1].lower() if len(fen.split()) > 1 else 'w'
 
-        board_tensor = fen_to_tensor(fen)
-
         try:
             absolute_idx = int(row['policy'])
         except (ValueError, OverflowError):
-            absolute_idx = 0
+            absolute_idx = -1
 
+        # Tránh lỗi nếu bằng cách nào đó vẫn lọt vào __getitem__
         if absolute_idx < 0 or absolute_idx >= 8100:
-            absolute_idx = 0
+            import random
+            return self.__getitem__(random.randint(0, len(self) - 1))
+
+        board_tensor = fen_to_tensor(fen)
 
         # GIẢI NÉN TỌA ĐỘ TUYỆT ĐỐI (Dựa trên mảng 90 ô)
         from_sq90 = absolute_idx // 90
@@ -166,27 +175,7 @@ class XiangqiNet(nn.Module):
         return value, logits_policy
 
 # =====================================================================
-# 5. CONVERT TO MPK FORMAT (Burn MessagePack)
-# =====================================================================
-def save_to_mpk(model, output_path):
-    import msgpack
-    state_dict = model.state_dict()
-    burn_dict = {}
-    for name, tensor in state_dict.items():
-        data = tensor.cpu().numpy()
-        burn_dict[name] = {
-            'data': data.flatten().tolist(),
-            'shape': list(data.shape),
-            'dtype': 'f32' 
-        }
-
-    with open(output_path, 'wb') as f:
-        packed = msgpack.packb(burn_dict, use_bin_type=True)
-        f.write(packed)
-    print(f"✅ Đã lưu model sang định dạng .mpk: {output_path}")
-
-# =====================================================================
-# 6. HÀM TRAIN 
+# 5. HÀM TRAIN 
 # =====================================================================
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -197,7 +186,7 @@ def train_model():
     
     epochs = 15
 
-    csv_path = "/content/drive/MyDrive/wisdom_models/replay_buffer.csv"
+    csv_path = "/kaggle/input/datasets/minhhoang2303/thisisforfun/replay_buffer.csv"
     if not os.path.exists(csv_path):
         print(f"❌ Không tìm thấy file {csv_path}")
         return
@@ -219,27 +208,29 @@ def train_model():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train_loader), eta_min=1e-5)
 
     # --- LOGIC RESUME QUAN TRỌNG Ở ĐÂY ---
-    latest_ckpt = "/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_latest.pth"
-    start_epoch = 0
-    if os.path.exists(latest_ckpt):
-        print(f"📂 Phát hiện checkpoint cũ, đang phục hồi trạng thái...")
-        checkpoint = torch.load(latest_ckpt, map_location=device)
+    # latest_ckpt = "/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_latest.pth"
+    # start_epoch = 0
+    # if os.path.exists(latest_ckpt):
+    #     print(f"📂 Phát hiện checkpoint cũ, đang phục hồi trạng thái...")
+    #     checkpoint = torch.load(latest_ckpt, map_location=device)
         
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    #     model.load_state_dict(checkpoint['model_state_dict'])
+    #     if 'optimizer_state_dict' in checkpoint:
+    #         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # Load scheduler để duy trì đúng đường cong giảm Learning Rate
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    #     # Load scheduler để duy trì đúng đường cong giảm Learning Rate
+    #     if 'scheduler_state_dict' in checkpoint:
+    #         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
-        start_epoch = checkpoint.get('epoch', 0)
-        print(f"✅ Đã load thành công. Tiếp tục từ Epoch {start_epoch + 1}")
-    else:
-        print("🆕 Không tìm thấy checkpoint, bắt đầu train mới từ Epoch 1")
+    #     start_epoch = checkpoint.get('epoch', 0)
+    #     print(f"✅ Đã load thành công. Tiếp tục từ Epoch {start_epoch + 1}")
+    # else:
+    #     print("🆕 Không tìm thấy checkpoint, bắt đầu train mới từ Epoch 1")
 
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss()
+
+    start_epoch = 0
 
     # Vòng lặp chạy từ start_epoch đến epochs
     for epoch in range(start_epoch, epochs):
@@ -259,8 +250,7 @@ def train_model():
             loss_v = mse_loss_fn(pred_values, target_values)
             loss_p = ce_loss_fn(pred_policies, target_policies)
 
-            value_weight = 2.0
-            loss = (value_weight * loss_v) + loss_p
+            loss = loss_v + loss_p
 
             loss.backward()
             optimizer.step()
@@ -310,9 +300,6 @@ def train_model():
         print(f"Train Time: {epoch_time:.2f}s")
         print(f"Val Value Loss: {avg_val_v:.4f} | Val Policy Loss: {avg_val_p:.4f}")
         print(f"Policy Accuracy (Top-1): {accuracy:.2f}%")
-
-        if not os.path.exists("./wisdom_models"):
-            os.makedirs("./wisdom_models")
             
         checkpoint = {
             'epoch': epoch + 1,
@@ -322,22 +309,19 @@ def train_model():
             'loss': loss,
         }
 
-        checkpoint_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.pth"
+        checkpoint_path = f"./wisdom_net_{epoch+1}.pth"
         torch.save(checkpoint, checkpoint_path)
         torch.save(checkpoint, latest_ckpt)
         print(f"✅ Đã lưu PyTorch checkpoint: {checkpoint_path}")
 
         state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
-        safetensors_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.safetensors"
+        safetensors_path = f"./wisdom_net_{epoch+1}.safetensors"
         save_file(state_dict_cpu, safetensors_path)
         print(f"✅ Đã lưu safetensors: {safetensors_path}")
 
-        mpk_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_{epoch+1}.mpk"
-        save_to_mpk(model, mpk_path)
-
         print(f"{'='*60}\n")
 
-    print("🎉 Hoàn tất quá trình huấn luyện V3 (15 Epoch)!")
+    print("🎉 Hoàn tất quá trình huấn luyện!")
 
 if __name__ == "__main__":
     train_model()
