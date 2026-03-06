@@ -311,7 +311,6 @@ def train_model():
 
         checkpoint_path = f"./wisdom_net_{epoch+1}.pth"
         torch.save(checkpoint, checkpoint_path)
-        torch.save(checkpoint, latest_ckpt)
         print(f"✅ Đã lưu PyTorch checkpoint: {checkpoint_path}")
 
         state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
