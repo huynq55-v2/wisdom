@@ -36,6 +36,11 @@ fn main() -> io::Result<()> {
     println!("⏳ Đang nạp mô hình từ file .mpk...");
     // Lưu ý: Đảm bảo bạn đã có file `xiangqi_net_weights.mpk`
     let model = config.load_model::<NdArray<f32>>("xiangqi_net_weights", &device);
+
+    // 🔥 THÊM DÒNG NÀY: Chuyển model sang chế độ Inference
+    // Tắt tính toán gradient, tắt Dropout và cố định BatchNorm
+    // let model = model.valid(); // Removed in newer Burn versions
+
     println!("✅ Nạp mô hình thành công!");
 
     // 2. Mở file dataset
@@ -106,15 +111,15 @@ fn main() -> io::Result<()> {
         let (_pred_value, pred_logits) = model.forward(input_tensor);
 
         // 5. Lấy Argmax (Chỉ số có xác suất cao nhất)
-        let logits_data = pred_logits.into_data();
-        let logits_slice = logits_data
-            .as_slice::<f32>()
-            .expect("Không thể lấy slice f32");
+        let logits_vec = pred_logits
+            .into_data()
+            .to_vec::<f32>()
+            .expect("Không thể lấy vec f32");
 
         let mut max_logit = f32::NEG_INFINITY;
         let mut best_action_idx = 0;
 
-        for (idx, &val) in logits_slice.iter().enumerate() {
+        for (idx, &val) in logits_vec.iter().enumerate() {
             if val > max_logit {
                 max_logit = val;
                 best_action_idx = idx;
