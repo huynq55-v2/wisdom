@@ -9,6 +9,9 @@ from safetensors.torch import save_file
 import time
 import os
 
+# XÓA torch_directml, DÙNG ipex
+import intel_extension_for_pytorch as ipex
+
 # =====================================================================
 # 1. HÀM CHUYỂN ĐỔI FEN SANG TENSOR VỚI PERSPECTIVE FIX
 # =====================================================================
@@ -58,7 +61,6 @@ def fen_to_tensor(fen_str):
 # 2. CÁC HÀM TIỆN ÍCH CHO ACTION SPACE 4500
 # =====================================================================
 def flip_dense_sq(dense_sq):
-    # Lật tọa độ 180 độ trong mảng 1D (0..89)
     return 89 - dense_sq
 
 def mirror_left_right(dense_sq):
@@ -132,23 +134,18 @@ class XiangqiDataset(Dataset):
         if absolute_idx < 0 or absolute_idx >= 8100:
             absolute_idx = 0
 
-        # GIẢI NÉN TỌA ĐỘ TUYỆT ĐỐI
         from_dense = absolute_idx // 90
         to_dense = absolute_idx % 90
 
-        # Nếu là Đen -> Lật mặt thành "Nước đi ảo"
         if stm == 'b':
             from_dense = flip_dense_sq(from_dense)
             to_dense = flip_dense_sq(to_dense)
 
-        # 2. DATA AUGMENTATION: 50% cơ hội lật đối xứng Trái - Phải
-        # Lưu ý: board_tensor có shape (14, 10, 9). Chiều cột là dim=2.
         if torch.rand(1).item() < 0.5:
             board_tensor = torch.flip(board_tensor, dims=[2])
             from_dense = mirror_left_right(from_dense)
             to_dense = mirror_left_right(to_dense)
 
-        # Tính toán Index
         compact_policy_idx = get_action_index(from_dense, to_dense)
 
         value = np.float32(row['value'])
@@ -193,10 +190,12 @@ class XiangqiNet(nn.Module):
         x = F.relu(self.bn_input(self.conv_input(x)))
         x_spatial = self.res_blocks(x)
 
-        x_pol = self.conv_policy(x_spatial).view(batch_size, -1)
+        # Đổi .view thành .reshape
+        x_pol = self.conv_policy(x_spatial).reshape(batch_size, -1)
         logits_policy = self.policy_head(x_pol)
 
-        x_val = x_spatial.view(batch_size, 128, -1).mean(dim=2)
+        # Đổi .view thành .reshape
+        x_val = x_spatial.reshape(batch_size, 128, -1).mean(dim=2)
         x_val = F.relu(self.fc1(x_val))
         value = torch.tanh(self.value_head(x_val))
         return value, logits_policy
@@ -225,17 +224,23 @@ def save_to_mpk(model, output_path):
 # 6. HÀM TRAIN 
 # =====================================================================
 def train_model():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Đang sử dụng thiết bị: {device}")
+    # === THIẾT LẬP THIẾT BỊ BẰNG IPEX (XPU) ===
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu")
+        print(f"🚀 Tuyệt vời! Đang sử dụng Intel GPU (XPU): {torch.xpu.get_device_name(0)}")
+    else:
+        device = torch.device("cpu")
+        print("⚠️ Không tìm thấy Intel XPU, đang chuyển sang cày bằng CPU.")
 
-    batch_size = 256
+    batch_size = 64 # Giảm Batch size xuống cho máy local đỡ ngộp
     learning_rate = 1e-3  
-    
-    epochs = 15
+    epochs = 3 # Local thì test nhẹ nhàng thôi
 
-    csv_path = "/kaggle/input/datasets/huyquang2309/xiangqi-mcts/replay_buffer.csv"
+    # === LƯU Ý: ĐƯỜNG DẪN LOCAL ===
+    # Hãy trỏ về file csv có trên máy tính của bạn
+    csv_path = "replay_buffer.csv" 
     if not os.path.exists(csv_path):
-        print(f"❌ Không tìm thấy file {csv_path}")
+        print(f"❌ Không tìm thấy file {csv_path}. Bạn nhớ copy file CSV về thư mục này nhé.")
         return
 
     full_dataset = XiangqiDataset(csv_path)
@@ -249,8 +254,10 @@ def train_model():
 
     model = XiangqiNet(num_res_blocks=8, channels=128).to(device)
 
+    # === LOAD TRƯỚC KHI OPTIMIZE ===
     latest_ckpt = "./wisdom_models/xiangqi_net_v3_python_latest.pth"
     start_epoch = 0
+    checkpoint = None
     if os.path.exists(latest_ckpt):
         print(f"📂 Tìm thấy checkpoint V3, đang load từ {latest_ckpt}...")
         checkpoint = torch.load(latest_ckpt, map_location=device)
@@ -259,7 +266,13 @@ def train_model():
         print(f"✅ Đã load model từ epoch {start_epoch}")
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    
+    if checkpoint and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    # === TỐI ƯU HÓA BẰNG IPEX ===
+    # Đây là dòng thần chú bắt buộc để kích hoạt sức mạnh của Intel
+    model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=torch.float32)
+
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train_loader), eta_min=1e-5)
 
     mse_loss_fn = nn.MSELoss()
@@ -287,8 +300,6 @@ def train_model():
 
             loss.backward()
             optimizer.step()
-            
-            # GIẢM LEARNING RATE MƯỢT MÀ TỪNG BATCH
             scheduler.step()
 
             total_loss += loss.item()
@@ -348,6 +359,7 @@ def train_model():
         torch.save(checkpoint, latest_ckpt)
         print(f"✅ Đã lưu PyTorch checkpoint: {checkpoint_path}")
 
+        # Lấy model state_dict gốc (bỏ qua các lớp bọc của IPEX nếu có)
         state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
         safetensors_path = f"./wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.safetensors"
         save_file(state_dict_cpu, safetensors_path)
