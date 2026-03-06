@@ -189,28 +189,6 @@ impl MCTS {
             sparse
         };
 
-        // ==========================================
-        // CHÈN ĐOẠN DEBUG VÀO ĐÚNG CHỖ NÀY
-        // ==========================================
-        let mut debug_priors = p_sparse.clone();
-        // Sắp xếp giảm dần theo giá trị Logit/Xác suất từ NN
-        debug_priors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-        println!("\n=== BẮT BỆNH MẠNG NN TẠI ROOT ===");
-        println!("Lượt đi của: {:?}", root_board.side_to_move);
-        for i in 0..std::cmp::min(5, debug_priors.len()) {
-            let mv = crate::r#move::Move(debug_priors[i].0);
-            let ucci_move = crate::ucci::move_to_ucci_string(mv);
-            println!(
-                "Top {}: {} (Điểm NN chấm: {:.4})",
-                i + 1,
-                ucci_move,
-                debug_priors[i].1
-            );
-        }
-        println!("=================================\n");
-        // ==========================================
-
         if let Some(start_idx) = self.allocate_children(p_sparse.len() as u32) {
             self.tree[0]
                 .children_index

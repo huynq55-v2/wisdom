@@ -2,13 +2,13 @@ use burn::record::NamedMpkFileRecorder;
 use burn::{
     backend::{Autodiff, Wgpu},
     data::{
-        dataloader::{batcher::Batcher, DataLoaderBuilder},
+        dataloader::{DataLoaderBuilder, batcher::Batcher},
         dataset::Dataset,
     },
-    optim::{decay::WeightDecayConfig, AdamConfig},
+    optim::{AdamConfig, decay::WeightDecayConfig},
     prelude::*,
-    train::{renderer::CliMetricsRenderer, Learner, SupervisedTraining},
     record::Recorder, // BẮT BUỘC PHẢI IMPORT ĐỂ DÙNG HÀM .load()
+    train::{Learner, SupervisedTraining, renderer::CliMetricsRenderer},
 };
 use crossbeam_channel::Sender;
 use rand::RngExt;
@@ -20,7 +20,7 @@ use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::mcts::MCTS;
 use wisdom::nn::board_to_tensor;
 use wisdom::nn::{
-    XiangqiNetConfig, XiangqiTrainingBatch, BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE,
+    BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNetConfig, XiangqiTrainingBatch,
 };
 use wisdom::tt::TranspositionTable;
 
@@ -94,7 +94,8 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
             }
 
             // 2. DATA AUGMENTATION: LẬT GƯƠNG NGANG
-            if rng.random_bool(0.5) { // Sửa .gen_bool() thành .random_bool() cho tương thích rand 0.9
+            if rng.random_bool(0.5) {
+                // Sửa .gen_bool() thành .random_bool() cho tương thích rand 0.9
                 for plane in 0..14 {
                     for r in 0..10 {
                         for c in 0..4 {
@@ -108,53 +109,21 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
                 to_c = 8 - to_c;
             }
 
-            // 3. TÍNH ACTION SPACE 4500
-            let dr = to_r as isize - from_r as isize;
-            let dc = to_c as isize - from_c as isize;
-
-            let mut plane = 0;
-            if dr < 0 && dc == 0 { plane = (-dr - 1) as usize; }
-            else if dr > 0 && dc == 0 { plane = (dr + 8) as usize; }
-            else if dr == 0 && dc < 0 { plane = (-dc + 17) as usize; }
-            else if dr == 0 && dc > 0 { plane = (dc + 25) as usize; }
-            else if dr.abs() == 2 && dc.abs() == 1 {
-                if dr == -2 && dc == -1 { plane = 34; }
-                else if dr == -2 && dc == 1 { plane = 35; }
-                else if dr == 2 && dc == -1 { plane = 36; }
-                else { plane = 37; }
-            }
-            else if dr.abs() == 1 && dc.abs() == 2 {
-                if dr == -1 && dc == -2 { plane = 38; }
-                else if dr == 1 && dc == -2 { plane = 39; }
-                else if dr == -1 && dc == 2 { plane = 40; }
-                else { plane = 41; }
-            }
-            else if dr.abs() == 2 && dc.abs() == 2 {
-                if dr == -2 && dc == -2 { plane = 42; }
-                else if dr == -2 && dc == 2 { plane = 43; }
-                else if dr == 2 && dc == -2 { plane = 44; }
-                else { plane = 45; }
-            }
-            else if dr.abs() == 1 && dc.abs() == 1 {
-                if dr == -1 && dc == -1 { plane = 46; }
-                else if dr == -1 && dc == 1 { plane = 47; }
-                else if dr == 1 && dc == -1 { plane = 48; }
-                else { plane = 49; }
-            }
-
-            let from_dense_perspective = from_r * 9 + from_c;
-            let compact_policy_idx = from_dense_perspective * 50 + plane;
+            // 3. TÍNH ACTION SPACE 8100
+            let from_sq90 = from_r * 9 + from_c;
+            let to_sq90 = to_r * 9 + to_c;
+            let policy_idx = from_sq90 * 90 + to_sq90;
 
             inputs_flat.extend_from_slice(&tensor);
             targets_v_flat.push(item.value);
-            targets_p_flat.push(compact_policy_idx as i32);
+            targets_p_flat.push(policy_idx as i32);
         }
 
         let inputs = Tensor::<B, 1>::from_data(inputs_flat.as_slice(), device)
             .reshape([batch_size, NUM_PLANES, BOARD_H, BOARD_W]);
 
-        let targets_v = Tensor::<B, 1>::from_data(targets_v_flat.as_slice(), device)
-            .reshape([batch_size, 1]);
+        let targets_v =
+            Tensor::<B, 1>::from_data(targets_v_flat.as_slice(), device).reshape([batch_size, 1]);
 
         let targets_p =
             Tensor::<B, 1, burn::tensor::Int>::from_data(targets_p_flat.as_slice(), device);
@@ -357,7 +326,7 @@ fn main() {
     let mut model = config.init::<MyBackend>(&device).load_record(record);
 
     let num_iterations = 500;
-    let games_per_iteration = 1280;
+    let games_per_iteration = 640;
     let concurrent_games = 128;
 
     let shared_tt = Arc::new(TranspositionTable::new(1024));
@@ -406,7 +375,7 @@ fn main() {
         );
         println!("============================================================");
 
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 32, 1);
+        let eval_queue = EvalQueue::new(model.clone(), device.clone(), 128, 1);
         let eval_tx = eval_queue.tx.clone();
 
         let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
@@ -477,8 +446,8 @@ fn main() {
         use rand::seq::SliceRandom;
         let mut train_dataset = dataset_snapshot;
         train_dataset.shuffle(&mut rand::rng());
-        
-        let sample_size = train_dataset.len().min(250_000);
+
+        let sample_size = train_dataset.len().min(500_000);
         train_dataset.truncate(sample_size);
 
         println!("============================================================");
@@ -533,17 +502,16 @@ fn main() {
         use burn::optim::lr_scheduler::constant::ConstantLr;
         let learner = Learner::new(
             autodiff_model,
-            AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4))).init(),
+            AdamConfig::new()
+                .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
+                .init(),
             ConstantLr::new(1e-4),
         );
 
-        let training = SupervisedTraining::new(
-            &iter_learner_dir,
-            dataloader_train,
-            dataloader_valid,
-        )
-        .num_epochs(1)
-        .renderer(CliMetricsRenderer::new());
+        let training =
+            SupervisedTraining::new(&iter_learner_dir, dataloader_train, dataloader_valid)
+                .num_epochs(1)
+                .renderer(CliMetricsRenderer::new());
 
         let result = training.launch(learner);
 
