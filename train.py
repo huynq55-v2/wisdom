@@ -55,50 +55,15 @@ def fen_to_tensor(fen_str):
     return torch.from_numpy(tensor)
 
 # =====================================================================
-# 2. CÁC HÀM TIỆN ÍCH CHO ACTION SPACE 4500
+# 2. CÁC HÀM TIỆN ÍCH CHO ACTION SPACE 8100
 # =====================================================================
-def flip_dense_sq(dense_sq):
+def flip_sq90(sq90):
     # Lật tọa độ 180 độ trong mảng 1D (0..89)
-    return 89 - dense_sq
+    return 89 - sq90
 
-def mirror_left_right(dense_sq):
-    r, c = dense_sq // 9, dense_sq % 9
+def mirror_sq90_left_right(sq90):
+    r, c = sq90 // 9, sq90 % 9
     return r * 9 + (8 - c)
-
-def get_action_index(from_dense, to_dense):
-    from_r, from_c = from_dense // 9, from_dense % 9
-    to_r, to_c = to_dense // 9, to_dense % 9
-
-    dr = to_r - from_r
-    dc = to_c - from_c
-
-    plane = 0
-    if dr < 0 and dc == 0: plane = -dr - 1
-    elif dr > 0 and dc == 0: plane = dr + 8
-    elif dr == 0 and dc < 0: plane = -dc + 17
-    elif dr == 0 and dc > 0: plane = dc + 25
-    elif abs(dr) == 2 and abs(dc) == 1:
-        if dr == -2 and dc == -1: plane = 34
-        elif dr == -2 and dc == 1: plane = 35
-        elif dr == 2 and dc == -1: plane = 36
-        else: plane = 37
-    elif abs(dr) == 1 and abs(dc) == 2:
-        if dr == -1 and dc == -2: plane = 38
-        elif dr == 1 and dc == -2: plane = 39
-        elif dr == -1 and dc == 2: plane = 40
-        else: plane = 41
-    elif abs(dr) == 2 and abs(dc) == 2:
-        if dr == -2 and dc == -2: plane = 42
-        elif dr == -2 and dc == 2: plane = 43
-        elif dr == 2 and dc == -2: plane = 44
-        else: plane = 45
-    elif abs(dr) == 1 and abs(dc) == 1:
-        if dr == -1 and dc == -1: plane = 46
-        elif dr == -1 and dc == 1: plane = 47
-        elif dr == 1 and dc == -1: plane = 48
-        else: plane = 49
-
-    return from_dense * 50 + plane
 
 # =====================================================================
 # 3. DATASET
@@ -132,32 +97,31 @@ class XiangqiDataset(Dataset):
         if absolute_idx < 0 or absolute_idx >= 8100:
             absolute_idx = 0
 
-        # GIẢI NÉN TỌA ĐỘ TUYỆT ĐỐI
-        from_dense = absolute_idx // 90
-        to_dense = absolute_idx % 90
+        # GIẢI NÉN TỌA ĐỘ TUYỆT ĐỐI (Dựa trên mảng 90 ô)
+        from_sq90 = absolute_idx // 90
+        to_sq90 = absolute_idx % 90
 
         # Nếu là Đen -> Lật mặt thành "Nước đi ảo"
         if stm == 'b':
-            from_dense = flip_dense_sq(from_dense)
-            to_dense = flip_dense_sq(to_dense)
+            from_sq90 = flip_sq90(from_sq90)
+            to_sq90 = flip_sq90(to_sq90)
 
         # 2. DATA AUGMENTATION: 50% cơ hội lật đối xứng Trái - Phải
-        # Lưu ý: board_tensor có shape (14, 10, 9). Chiều cột là dim=2.
         if torch.rand(1).item() < 0.5:
             board_tensor = torch.flip(board_tensor, dims=[2])
-            from_dense = mirror_left_right(from_dense)
-            to_dense = mirror_left_right(to_dense)
+            from_sq90 = mirror_sq90_left_right(from_sq90)
+            to_sq90 = mirror_sq90_left_right(to_sq90)
 
-        # Tính toán Index
-        compact_policy_idx = get_action_index(from_dense, to_dense)
+        # Tính toán lại Index cho không gian 8100
+        policy_idx = from_sq90 * 90 + to_sq90
 
         value = np.float32(row['value'])
         value = np.clip(value, -1.0, 1.0)
 
-        return board_tensor, np.int64(compact_policy_idx), value
+        return board_tensor, np.int64(policy_idx), value
 
 # =====================================================================
-# 4. MODEL RESNET (8 BLOCKS, 4500 POLICY)
+# 4. MODEL RESNET (8 BLOCKS, 8100 POLICY)
 # =====================================================================
 class ResBlock(nn.Module):
     def __init__(self, channels):
@@ -183,7 +147,7 @@ class XiangqiNet(nn.Module):
         self.res_blocks = nn.Sequential(*[ResBlock(channels) for _ in range(num_res_blocks)])
 
         self.conv_policy = nn.Conv2d(channels, 2, kernel_size=1)
-        self.policy_head = nn.Linear(2 * 10 * 9, 4500)
+        self.policy_head = nn.Linear(2 * 10 * 9, 8100) # ĐÃ TĂNG LÊN 8100
 
         self.fc1 = nn.Linear(channels, 64)
         self.value_head = nn.Linear(64, 1)

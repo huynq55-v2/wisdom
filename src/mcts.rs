@@ -4,7 +4,7 @@ use crate::r#move::Move;
 
 use crate::tt::TranspositionTable;
 use crossbeam_channel::Sender;
-use rand_distr::{multi::Dirichlet, Distribution};
+use rand_distr::{Distribution, multi::Dirichlet};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 // pub const C_PUCT: f32 = 1.5;
@@ -169,14 +169,18 @@ impl MCTS {
                 .map(|m| {
                     // 1 & 2: Xác định điểm bắt đầu và kết thúc (Lật nếu là quân Đen)
                     let (from_sq, to_sq) = if current_side == Color::Black {
-                        (crate::nn::flip_square(m.from_sq() as usize), 
-                         crate::nn::flip_square(m.to_sq() as usize))
+                        (
+                            crate::nn::flip_square(m.from_sq() as usize),
+                            crate::nn::flip_square(m.to_sq() as usize),
+                        )
                     } else {
                         (m.from_sq() as usize, m.to_sq() as usize)
                     };
-                    
+
                     // 3 & 4: Tính ra index dựa trên "nước đi đã lật"
-                    let nn_idx = crate::nn::get_policy_index(from_sq, to_sq);
+                    let from_sq90 = (from_sq / 16) * 9 + (from_sq % 16);
+                    let to_sq90 = (to_sq / 16) * 9 + (to_sq % 16);
+                    let nn_idx = from_sq90 * 90 + to_sq90;
                     (m.0, p_full[nn_idx])
                 })
                 .collect();
@@ -191,13 +195,18 @@ impl MCTS {
         let mut debug_priors = p_sparse.clone();
         // Sắp xếp giảm dần theo giá trị Logit/Xác suất từ NN
         debug_priors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
+
         println!("\n=== BẮT BỆNH MẠNG NN TẠI ROOT ===");
         println!("Lượt đi của: {:?}", root_board.side_to_move);
         for i in 0..std::cmp::min(5, debug_priors.len()) {
             let mv = crate::r#move::Move(debug_priors[i].0);
             let ucci_move = crate::ucci::move_to_ucci_string(mv);
-            println!("Top {}: {} (Điểm NN chấm: {:.4})", i + 1, ucci_move, debug_priors[i].1);
+            println!(
+                "Top {}: {} (Điểm NN chấm: {:.4})",
+                i + 1,
+                ucci_move,
+                debug_priors[i].1
+            );
         }
         println!("=================================\n");
         // ==========================================
@@ -589,9 +598,11 @@ impl MCTS {
                                 (f_sq, t_sq)
                             };
 
-                            // 3. Tra cứu index trong Action Space 4500
-                            let nn_idx = crate::nn::get_policy_index(f_perspective, t_perspective);
-                            
+                            // 3. Tra cứu index trong Action Space 8100
+                            let from_sq90 = (f_perspective / 16) * 9 + (f_perspective % 16);
+                            let to_sq90 = (t_perspective / 16) * 9 + (t_perspective % 16);
+                            let nn_idx = from_sq90 * 90 + to_sq90;
+
                             // Trả về tuple (mã nước đi gốc của engine, xác suất từ NN)
                             (m.0, p_full[nn_idx])
                         })

@@ -3,8 +3,8 @@ use burn::prelude::*;
 use burn::record::{FullPrecisionSettings, Recorder};
 use burn::{
     nn::{
-        conv::{Conv2d, Conv2dConfig},
         BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
+        conv::{Conv2d, Conv2dConfig},
     },
     record::NamedMpkFileRecorder,
 };
@@ -14,22 +14,21 @@ pub const NUM_PLANES: usize = 14;
 pub const BOARD_H: usize = 10;
 pub const BOARD_W: usize = 9;
 pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1260
-pub const ACTION_SPACE: usize = 4500; // ĐÃ NÉN TỪ 8100 XUỐNG 4500
+pub const ACTION_SPACE: usize = 8100; // ĐÃ TĂNG LÊN 8100 (90 x 90)
 
 // ============================================================
-// Action Mapping (NEW 4500 ACTION SPACE)
+// Action Mapping (8100 ACTION SPACE)
 // ============================================================
 
 /// Convert a Move to an Absolute Index (0..8099).
-/// Dùng duy nhất cho việc LƯU DATA VÀO FILE CSV (Replay Buffer).
 pub fn move_to_index(m: crate::r#move::Move) -> usize {
     let from_sq = m.from_sq() as usize;
     let to_sq = m.to_sq() as usize;
 
-    let from_dense = (from_sq / 16) * 9 + (from_sq % 16);
-    let to_dense = (to_sq / 16) * 9 + (to_sq % 16);
+    let from_sq90 = (from_sq / 16) * 9 + (from_sq % 16);
+    let to_sq90 = (to_sq / 16) * 9 + (to_sq % 16);
 
-    from_dense * 90 + to_dense
+    from_sq90 * 90 + to_sq90
 }
 
 // Hàm hỗ trợ lật tọa độ trên bàn cờ 16x16 (0x88)
@@ -39,50 +38,6 @@ pub fn flip_square(sq: usize) -> usize {
     let flipped_r = 9 - r;
     let flipped_c = 8 - c;
     flipped_r * 16 + flipped_c
-}
-
-// Hàm thuần túy tra cứu Index (Mù màu, luôn coi như Đỏ đang đi)
-pub fn get_policy_index(from_sq: usize, to_sq: usize) -> usize {
-    let r1 = from_sq / 16;
-    let c1 = from_sq % 16;
-    let r2 = to_sq / 16;
-    let c2 = to_sq % 16;
-
-    let dr = r2 as isize - r1 as isize;
-    let dc = c2 as isize - c1 as isize;
-
-    let mut plane = 0;
-    if dr < 0 && dc == 0 { plane = (-dr - 1) as usize; }
-    else if dr > 0 && dc == 0 { plane = (dr + 8) as usize; }
-    else if dr == 0 && dc < 0 { plane = (-dc + 17) as usize; }
-    else if dr == 0 && dc > 0 { plane = (dc + 25) as usize; }
-    else if dr.abs() == 2 && dc.abs() == 1 {
-        if dr == -2 && dc == -1 { plane = 34; }
-        else if dr == -2 && dc == 1 { plane = 35; }
-        else if dr == 2 && dc == -1 { plane = 36; }
-        else { plane = 37; }
-    }
-    else if dr.abs() == 1 && dc.abs() == 2 {
-        if dr == -1 && dc == -2 { plane = 38; }
-        else if dr == 1 && dc == -2 { plane = 39; }
-        else if dr == -1 && dc == 2 { plane = 40; }
-        else { plane = 41; }
-    }
-    else if dr.abs() == 2 && dc.abs() == 2 {
-        if dr == -2 && dc == -2 { plane = 42; }
-        else if dr == -2 && dc == 2 { plane = 43; }
-        else if dr == 2 && dc == -2 { plane = 44; }
-        else { plane = 45; }
-    }
-    else if dr.abs() == 1 && dc.abs() == 1 {
-        if dr == -1 && dc == -1 { plane = 46; }
-        else if dr == -1 && dc == 1 { plane = 47; }
-        else if dr == 1 && dc == -1 { plane = 48; }
-        else { plane = 49; }
-    }
-
-    let from_dense = r1 * 9 + c1;
-    from_dense * 50 + plane
 }
 
 // ============================================================
@@ -203,7 +158,7 @@ pub struct XiangqiNetConfig;
 impl XiangqiNetConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> XiangqiNet<B> {
         let channels = 128;
-        let num_res_blocks = 8; // ĐÃ TĂNG LÊN 15 BLOCKS
+        let num_res_blocks = 8; // Tùy chỉnh số lượng blocks
 
         let mut res_blocks = Vec::with_capacity(num_res_blocks);
         for _ in 0..num_res_blocks {
@@ -219,7 +174,7 @@ impl XiangqiNetConfig {
             res_blocks,
 
             conv_policy: Conv2dConfig::new([channels, 2], [1, 1]).init(device),
-            // ACTION_SPACE BÂY GIỜ LÀ 4500
+            // ACTION_SPACE BÂY GIỜ LÀ 8100
             policy_head: LinearConfig::new(2 * BOARD_H * BOARD_W, ACTION_SPACE).init(device),
 
             fc1: LinearConfig::new(channels, 64).init(device),
