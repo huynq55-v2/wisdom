@@ -228,12 +228,12 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Đang sử dụng thiết bị: {device}")
 
-    batch_size = 256
-    learning_rate = 1e-3  
+    batch_size = 1024
+    learning_rate = 2e-3  
     
     epochs = 15
 
-    csv_path = "/kaggle/input/datasets/huyquang2309/xiangqi-mcts/replay_buffer.csv"
+    csv_path = "/content/drive/MyDrive/wisdom_models/replay_buffer.csv"
     if not os.path.exists(csv_path):
         print(f"❌ Không tìm thấy file {csv_path}")
         return
@@ -247,25 +247,38 @@ def train_model():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
+    # --- KHỞI TẠO MODEL & OPTIMIZER ---
     model = XiangqiNet(num_res_blocks=8, channels=128).to(device)
-
-    latest_ckpt = "./wisdom_models/xiangqi_net_v3_python_latest.pth"
-    start_epoch = 0
-    if os.path.exists(latest_ckpt):
-        print(f"📂 Tìm thấy checkpoint V3, đang load từ {latest_ckpt}...")
-        checkpoint = torch.load(latest_ckpt, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0)
-        print(f"✅ Đã load model từ epoch {start_epoch}")
-
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
+    # T_max phải tính dựa trên TỔNG số bước của toàn bộ quá trình (epochs)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train_loader), eta_min=1e-5)
+
+    # --- LOGIC RESUME QUAN TRỌNG Ở ĐÂY ---
+    latest_ckpt = "/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_latest.pth"
+    start_epoch = 0
+    if os.path.exists(latest_ckpt):
+        print(f"📂 Phát hiện checkpoint cũ, đang phục hồi trạng thái...")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load scheduler để duy trì đúng đường cong giảm Learning Rate
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+        start_epoch = checkpoint.get('epoch', 0)
+        print(f"✅ Đã load thành công. Tiếp tục từ Epoch {start_epoch + 1}")
+    else:
+        print("🆕 Không tìm thấy checkpoint, bắt đầu train mới từ Epoch 1")
 
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss()
 
-    for epoch in range(start_epoch, start_epoch + epochs):
+    # Vòng lặp chạy từ start_epoch đến epochs
+    for epoch in range(start_epoch, epochs):
         model.train()
         start_time = time.time()
         total_loss = 0
@@ -341,24 +354,26 @@ def train_model():
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(), # Lưu cả lịch trình giảm LR
+            'loss': loss,
         }
 
-        checkpoint_path = f"./wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.pth"
+        checkpoint_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.pth"
         torch.save(checkpoint, checkpoint_path)
         torch.save(checkpoint, latest_ckpt)
         print(f"✅ Đã lưu PyTorch checkpoint: {checkpoint_path}")
 
         state_dict_cpu = {k: v.cpu().contiguous() for k, v in model.state_dict().items()}
-        safetensors_path = f"./wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.safetensors"
+        safetensors_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_epoch_{epoch+1}.safetensors"
         save_file(state_dict_cpu, safetensors_path)
         print(f"✅ Đã lưu safetensors: {safetensors_path}")
 
-        mpk_path = f"./wisdom_models/xiangqi_net_v3_python_{epoch+1}.mpk"
+        mpk_path = f"/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_{epoch+1}.mpk"
         save_to_mpk(model, mpk_path)
 
         print(f"{'='*60}\n")
 
-    print("🎉 Hoàn tất quá trình huấn luyện V3 (3 Epoch)!")
+    print("🎉 Hoàn tất quá trình huấn luyện V3 (15 Epoch)!")
 
 if __name__ == "__main__":
     train_model()
