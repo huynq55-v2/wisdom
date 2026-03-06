@@ -165,7 +165,7 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
     let tt = crate::tt::TranspositionTable::new(64);
 
     // Start NN Eval Queue (automatically spawns background thread)
-    let eval_queue = EvalQueue::new(model, device, 32, 5);
+    let eval_queue = EvalQueue::new(model, device, 64, 5);
     // Store transmitter for MCTS
     let eval_tx = eval_queue.tx.clone();
 
@@ -234,7 +234,7 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
 
                 // Call MCTS Search with full game history for repetition detection
                 let (best_move, metrics) =
-                    mcts.search_best_move(&board, &game_history, simulations, &eval_tx, &tt, 4, false);
+                    mcts.search_best_move(&board, &game_history, simulations, &eval_tx, &tt, 256, false);
 
                 // UCCI Info format: info depth 0 nodes {root_visits} score winpct {win_pct} pv {pv}
                 let mut pv_str = String::new();

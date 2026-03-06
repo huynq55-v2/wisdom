@@ -298,7 +298,7 @@ async fn main() {
     // UI State
     let mut game_mode = GameMode::EngineVsPlayer;
     let mut human_color = PieceColor::Red;
-    let mut mcts_simulations: usize = 4000;
+    let mut mcts_simulations: usize = 400;
     let mut current_eval: Option<String> = Some("Ready".to_string());
     let mut engine_policy: Vec<String> = Vec::new();
 

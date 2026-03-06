@@ -1,4 +1,4 @@
-use crate::board::{Board, HistoryEntry, PieceType, RepetitionResult};
+use crate::board::{Board, Color, HistoryEntry, PieceType, RepetitionResult};
 use crate::eval_queue::EvalRequest;
 use crate::r#move::Move;
 
@@ -167,7 +167,16 @@ impl MCTS {
             let sparse: Vec<(u16, f32)> = legal_moves
                 .iter()
                 .map(|m| {
-                    let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
+                    // 1 & 2: Xác định điểm bắt đầu và kết thúc (Lật nếu là quân Đen)
+                    let (from_sq, to_sq) = if current_side == Color::Black {
+                        (crate::nn::flip_square(m.from_sq() as usize), 
+                         crate::nn::flip_square(m.to_sq() as usize))
+                    } else {
+                        (m.from_sq() as usize, m.to_sq() as usize)
+                    };
+                    
+                    // 3 & 4: Tính ra index dựa trên "nước đi đã lật"
+                    let nn_idx = crate::nn::get_policy_index(from_sq, to_sq);
                     (m.0, p_full[nn_idx])
                 })
                 .collect();
@@ -175,6 +184,23 @@ impl MCTS {
             tt.record(root_board.zobrist_key, val, &sparse, tt_age);
             sparse
         };
+
+        // ==========================================
+        // CHÈN ĐOẠN DEBUG VÀO ĐÚNG CHỖ NÀY
+        // ==========================================
+        let mut debug_priors = p_sparse.clone();
+        // Sắp xếp giảm dần theo giá trị Logit/Xác suất từ NN
+        debug_priors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        println!("\n=== BẮT BỆNH MẠNG NN TẠI ROOT ===");
+        println!("Lượt đi của: {:?}", root_board.side_to_move);
+        for i in 0..std::cmp::min(5, debug_priors.len()) {
+            let mv = crate::r#move::Move(debug_priors[i].0);
+            let ucci_move = crate::ucci::move_to_ucci_string(mv);
+            println!("Top {}: {} (Điểm NN chấm: {:.4})", i + 1, ucci_move, debug_priors[i].1);
+        }
+        println!("=================================\n");
+        // ==========================================
 
         if let Some(start_idx) = self.allocate_children(p_sparse.len() as u32) {
             self.tree[0]
@@ -548,11 +574,25 @@ impl MCTS {
                     value = v;
                     let p_full = opt_p.unwrap();
 
-                    // Lọc và nén Policy
+                    // Lọc và nén Policy bằng cách ánh xạ nước đi thực tế sang Action Space của Neural Network
                     p_sparse = legal_moves
                         .iter()
                         .map(|m| {
-                            let nn_idx = crate::nn::move_to_index_perspective(*m, current_side);
+                            // 1. Lấy tọa độ gốc (0x88)
+                            let f_sq = m.from_sq() as usize;
+                            let t_sq = m.to_sq() as usize;
+
+                            // 2. Nếu là bên Đen đi, lật tọa độ để AI nhìn dưới góc nhìn "luôn đi dưới lên"
+                            let (f_perspective, t_perspective) = if current_side == Color::Black {
+                                (crate::nn::flip_square(f_sq), crate::nn::flip_square(t_sq))
+                            } else {
+                                (f_sq, t_sq)
+                            };
+
+                            // 3. Tra cứu index trong Action Space 4500
+                            let nn_idx = crate::nn::get_policy_index(f_perspective, t_perspective);
+                            
+                            // Trả về tuple (mã nước đi gốc của engine, xác suất từ NN)
                             (m.0, p_full[nn_idx])
                         })
                         .collect();

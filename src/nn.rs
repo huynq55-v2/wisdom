@@ -32,63 +32,48 @@ pub fn move_to_index(m: crate::r#move::Move) -> usize {
     from_dense * 90 + to_dense
 }
 
-/// Convert a Move to an Index (0..4499) for the MCTS Policy Head.
-/// Hàm này tự động lật Perspective (nếu phe Đen đi) và tính ra 1 trong 50 Planes.
-pub fn move_to_index_perspective(m: crate::r#move::Move, stm: Color) -> usize {
-    let from_sq = m.from_sq() as usize;
-    let to_sq = m.to_sq() as usize;
+// Hàm hỗ trợ lật tọa độ trên bàn cờ 16x16 (0x88)
+pub fn flip_square(sq: usize) -> usize {
+    let r = sq / 16;
+    let c = sq % 16;
+    let flipped_r = 9 - r;
+    let flipped_c = 8 - c;
+    flipped_r * 16 + flipped_c
+}
 
-    // Tọa độ gốc
-    let mut from_r = from_sq / 16;
-    let mut from_c = from_sq % 16;
-    let mut to_r = to_sq / 16;
-    let mut to_c = to_sq % 16;
+// Hàm thuần túy tra cứu Index (Mù màu, luôn coi như Đỏ đang đi)
+pub fn get_policy_index(from_sq: usize, to_sq: usize) -> usize {
+    let r1 = from_sq / 16;
+    let c1 = from_sq % 16;
+    let r2 = to_sq / 16;
+    let c2 = to_sq % 16;
 
-    // Nếu phe Đen đang đi, Lật mặt (Perspective)
-    if stm == Color::Black {
-        from_r = 9 - from_r;
-        from_c = 8 - from_c;
-        to_r = 9 - to_r;
-        to_c = 8 - to_c;
-    }
-
-    // Tính khoảng cách
-    let dr = to_r as isize - from_r as isize;
-    let dc = to_c as isize - from_c as isize;
+    let dr = r2 as isize - r1 as isize;
+    let dc = c2 as isize - c1 as isize;
 
     let mut plane = 0;
-    
-    // 34 Hướng đi thẳng (Xe, Pháo, Tốt, Tướng)
     if dr < 0 && dc == 0 { plane = (-dr - 1) as usize; }
     else if dr > 0 && dc == 0 { plane = (dr + 8) as usize; }
     else if dr == 0 && dc < 0 { plane = (-dc + 17) as usize; }
     else if dr == 0 && dc > 0 { plane = (dc + 25) as usize; }
-    
-    // 8 Hướng nhảy Mã
     else if dr.abs() == 2 && dc.abs() == 1 {
         if dr == -2 && dc == -1 { plane = 34; }
         else if dr == -2 && dc == 1 { plane = 35; }
         else if dr == 2 && dc == -1 { plane = 36; }
         else { plane = 37; }
     }
-    
-    // 8 Hướng nhảy Mã (tiếp)
     else if dr.abs() == 1 && dc.abs() == 2 {
         if dr == -1 && dc == -2 { plane = 38; }
         else if dr == 1 && dc == -2 { plane = 39; }
         else if dr == -1 && dc == 2 { plane = 40; }
         else { plane = 41; }
     }
-    
-    // 4 Hướng bay Tượng
     else if dr.abs() == 2 && dc.abs() == 2 {
         if dr == -2 && dc == -2 { plane = 42; }
         else if dr == -2 && dc == 2 { plane = 43; }
         else if dr == 2 && dc == -2 { plane = 44; }
         else { plane = 45; }
     }
-    
-    // 4 Hướng đi Sĩ
     else if dr.abs() == 1 && dc.abs() == 1 {
         if dr == -1 && dc == -1 { plane = 46; }
         else if dr == -1 && dc == 1 { plane = 47; }
@@ -96,8 +81,8 @@ pub fn move_to_index_perspective(m: crate::r#move::Move, stm: Color) -> usize {
         else { plane = 49; }
     }
 
-    let from_dense_perspective = from_r * 9 + from_c;
-    from_dense_perspective * 50 + plane
+    let from_dense = r1 * 9 + c1;
+    from_dense * 50 + plane
 }
 
 // ============================================================
@@ -218,7 +203,7 @@ pub struct XiangqiNetConfig;
 impl XiangqiNetConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> XiangqiNet<B> {
         let channels = 128;
-        let num_res_blocks = 15; // ĐÃ TĂNG LÊN 15 BLOCKS
+        let num_res_blocks = 8; // ĐÃ TĂNG LÊN 15 BLOCKS
 
         let mut res_blocks = Vec::with_capacity(num_res_blocks);
         for _ in 0..num_res_blocks {

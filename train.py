@@ -55,7 +55,49 @@ def fen_to_tensor(fen_str):
     return torch.from_numpy(tensor)
 
 # =====================================================================
-# 2. DATASET VỚI ACTION SPACE 4500 (90 x 50)
+# 2. CÁC HÀM TIỆN ÍCH CHO ACTION SPACE 4500
+# =====================================================================
+def flip_dense_sq(dense_sq):
+    # Lật tọa độ 180 độ trong mảng 1D (0..89)
+    return 89 - dense_sq
+
+def get_action_index(from_dense, to_dense):
+    from_r, from_c = from_dense // 9, from_dense % 9
+    to_r, to_c = to_dense // 9, to_dense % 9
+
+    dr = to_r - from_r
+    dc = to_c - from_c
+
+    plane = 0
+    if dr < 0 and dc == 0: plane = -dr - 1
+    elif dr > 0 and dc == 0: plane = dr + 8
+    elif dr == 0 and dc < 0: plane = -dc + 17
+    elif dr == 0 and dc > 0: plane = dc + 25
+    elif abs(dr) == 2 and abs(dc) == 1:
+        if dr == -2 and dc == -1: plane = 34
+        elif dr == -2 and dc == 1: plane = 35
+        elif dr == 2 and dc == -1: plane = 36
+        else: plane = 37
+    elif abs(dr) == 1 and abs(dc) == 2:
+        if dr == -1 and dc == -2: plane = 38
+        elif dr == 1 and dc == -2: plane = 39
+        elif dr == -1 and dc == 2: plane = 40
+        else: plane = 41
+    elif abs(dr) == 2 and abs(dc) == 2:
+        if dr == -2 and dc == -2: plane = 42
+        elif dr == -2 and dc == 2: plane = 43
+        elif dr == 2 and dc == -2: plane = 44
+        else: plane = 45
+    elif abs(dr) == 1 and abs(dc) == 1:
+        if dr == -1 and dc == -1: plane = 46
+        elif dr == -1 and dc == 1: plane = 47
+        elif dr == 1 and dc == -1: plane = 48
+        else: plane = 49
+
+    return from_dense * 50 + plane
+
+# =====================================================================
+# 3. DATASET
 # =====================================================================
 class XiangqiDataset(Dataset):
     def __init__(self, csv_file):
@@ -89,45 +131,14 @@ class XiangqiDataset(Dataset):
         # GIẢI NÉN TỌA ĐỘ TUYỆT ĐỐI
         from_dense = absolute_idx // 90
         to_dense = absolute_idx % 90
-        from_r, from_c = from_dense // 9, from_dense % 9
-        to_r, to_c = to_dense // 9, to_dense % 9
 
-        # LẬT MẶT TỌA ĐỘ
+        # Nếu là Đen -> Lật mặt thành "Nước đi ảo"
         if stm == 'b':
-            from_r, from_c = 9 - from_r, 8 - from_c
-            to_r, to_c = 9 - to_r, 8 - to_c
+            from_dense = flip_dense_sq(from_dense)
+            to_dense = flip_dense_sq(to_dense)
 
-        dr = to_r - from_r
-        dc = to_c - from_c
-
-        plane = 0
-        if dr < 0 and dc == 0: plane = -dr - 1
-        elif dr > 0 and dc == 0: plane = dr + 8
-        elif dr == 0 and dc < 0: plane = -dc + 17
-        elif dr == 0 and dc > 0: plane = dc + 25
-        elif abs(dr) == 2 and abs(dc) == 1:
-            if dr == -2 and dc == -1: plane = 34
-            elif dr == -2 and dc == 1: plane = 35
-            elif dr == 2 and dc == -1: plane = 36
-            else: plane = 37
-        elif abs(dr) == 1 and abs(dc) == 2:
-            if dr == -1 and dc == -2: plane = 38
-            elif dr == 1 and dc == -2: plane = 39
-            elif dr == -1 and dc == 2: plane = 40
-            else: plane = 41
-        elif abs(dr) == 2 and abs(dc) == 2:
-            if dr == -2 and dc == -2: plane = 42
-            elif dr == -2 and dc == 2: plane = 43
-            elif dr == 2 and dc == -2: plane = 44
-            else: plane = 45
-        elif abs(dr) == 1 and abs(dc) == 1:
-            if dr == -1 and dc == -1: plane = 46
-            elif dr == -1 and dc == 1: plane = 47
-            elif dr == 1 and dc == -1: plane = 48
-            else: plane = 49
-
-        from_dense_perspective = from_r * 9 + from_c
-        compact_policy_idx = from_dense_perspective * 50 + plane
+        # Tính toán Index
+        compact_policy_idx = get_action_index(from_dense, to_dense)
 
         value = np.float32(row['value'])
         value = np.clip(value, -1.0, 1.0)
@@ -135,7 +146,7 @@ class XiangqiDataset(Dataset):
         return board_tensor, np.int64(compact_policy_idx), value
 
 # =====================================================================
-# 3. MODEL RESNET (15 BLOCKS, 4500 POLICY)
+# 4. MODEL RESNET (8 BLOCKS, 4500 POLICY)
 # =====================================================================
 class ResBlock(nn.Module):
     def __init__(self, channels):
@@ -154,7 +165,7 @@ class ResBlock(nn.Module):
         return out
 
 class XiangqiNet(nn.Module):
-    def __init__(self, num_res_blocks=15, channels=128):
+    def __init__(self, num_res_blocks=8, channels=128):
         super(XiangqiNet, self).__init__()
         self.conv_input = nn.Conv2d(14, channels, kernel_size=3, padding=1, bias=False)
         self.bn_input = nn.BatchNorm2d(channels)
@@ -180,7 +191,7 @@ class XiangqiNet(nn.Module):
         return value, logits_policy
 
 # =====================================================================
-# 4. CONVERT TO MPK FORMAT (Burn MessagePack)
+# 5. CONVERT TO MPK FORMAT (Burn MessagePack)
 # =====================================================================
 def save_to_mpk(model, output_path):
     import msgpack
@@ -200,7 +211,7 @@ def save_to_mpk(model, output_path):
     print(f"✅ Đã lưu model sang định dạng .mpk: {output_path}")
 
 # =====================================================================
-# 5. HÀM TRAIN 1 EPOCH DUY NHẤT VỚI SCHEDULER
+# 6. HÀM TRAIN 
 # =====================================================================
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,7 +236,7 @@ def train_model():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    model = XiangqiNet(num_res_blocks=15, channels=128).to(device)
+    model = XiangqiNet(num_res_blocks=8, channels=128).to(device)
 
     latest_ckpt = "./wisdom_models/xiangqi_net_v3_python_latest.pth"
     start_epoch = 0
