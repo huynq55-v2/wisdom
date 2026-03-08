@@ -256,12 +256,14 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         move_count += 1;
     }
 
+    let alpha = 0.2; // Tỷ lệ giữ lại giá trị Search
+
     let final_items: Vec<SelfPlayItem> = match winner {
         None => game_records
             .into_iter()
             .map(|(fen, search_val, _side, policy)| SelfPlayItem {
                 fen,
-                value: search_val * 0.05, // 0.9 * 0 (Draw) + 0.1 * search_val
+                value: search_val * alpha,
                 policy,
             })
             .collect(),
@@ -271,7 +273,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
                 let z = if side == winning_color { 1.0 } else { -1.0 };
                 SelfPlayItem {
                     fen,
-                    value: search_val * 0.05 + z * 0.95,
+                    value: search_val * alpha + z * (1.0 - alpha),
                     policy,
                 }
             })
