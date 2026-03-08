@@ -535,7 +535,7 @@ fn main() {
 
         model = result.model;
 
-        let _ = std::fs::remove_dir_all(&iter_learner_dir);
+        // let _ = std::fs::remove_dir_all(&iter_learner_dir);
 
         let final_mpk_path = format!("{}/xiangqi_net_version_{}", model_dir, version);
         model
