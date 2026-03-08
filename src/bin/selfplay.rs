@@ -457,7 +457,7 @@ fn main() {
 
         if current_buffer_size < 50_000 {
             println!(
-                "⏳ Replay Buffer hiện có {} FENs. Đang tích lũy chờ đạt mốc 25,000 FENs mới bắt đầu Train...",
+                "⏳ Replay Buffer hiện có {} FENs. Đang tích lũy chờ đạt mốc 50,000 FENs mới bắt đầu Train...",
                 current_buffer_size
             );
             continue; // Bỏ qua bước train, quay lại vòng lặp iter mới để gen thêm ván cờ
