@@ -535,7 +535,39 @@ fn main() {
 
         model = result.model;
 
-        // let _ = std::fs::remove_dir_all(&iter_learner_dir);
+        // --- ĐOẠN CODE MỚI THÊM: TRÍCH XUẤT KẾT QUẢ VALIDATION ---
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let loss_file = format!("{}/valid-loss.jsonl", iter_learner_dir);
+        let acc_file = format!("{}/valid-accuracy.jsonl", iter_learner_dir);
+
+        // Hàm đọc dòng cuối cùng của file jsonl để lấy value
+        let get_last_value = |path: &str| -> Option<String> {
+            let file = File::open(path).ok()?;
+            let last_line = BufReader::new(file).lines().filter_map(|l| l.ok()).last()?;
+            // Phân tích cú pháp thô chuỗi JSON (vd: {"value": 0.015})
+            let parts: Vec<&str> = last_line.split("\"value\":").collect();
+            if parts.len() > 1 {
+                let val = parts[1].trim_matches(|c| c == ' ' || c == '}' || c == '\n');
+                // Nếu là accuracy, Burn hay lưu kiểu 0.4465 (nghĩa là 44.65%)
+                Some(val.to_string())
+            } else {
+                None
+            }
+        };
+
+        let final_loss = get_last_value(&loss_file).unwrap_or_else(|| "N/A".to_string());
+        let final_acc = get_last_value(&acc_file).unwrap_or_else(|| "N/A".to_string());
+
+        println!(
+            "\n📊 TỔNG KẾT VERSION {}: Val Loss = {} | Val Acc = {}\n",
+            version, final_loss, final_acc
+        );
+        // ----------------------------------------------------------
+
+        // BÂY GIỜ MỚI XÓA THƯ MỤC
+        let _ = std::fs::remove_dir_all(&iter_learner_dir);
 
         let final_mpk_path = format!("{}/xiangqi_net_version_{}", model_dir, version);
         model
