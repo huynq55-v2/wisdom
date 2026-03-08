@@ -13,8 +13,9 @@ use burn::{
 };
 use crossbeam_channel::Sender;
 use rand::RngExt;
-use std::fs::OpenOptions;
+
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
@@ -284,6 +285,64 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
 }
 
 // ==========================================================
+// Hàm hỗ trợ nạp Shard từ ổ cứng vào RAM
+// ==========================================================
+fn load_all_shards(buffers_dir: &str, max_size: usize) -> Vec<SelfPlayItem> {
+    let mut items = Vec::new();
+    let mut shard_files: Vec<PathBuf> = Vec::new();
+
+    // Thu thập tất cả file shard từ các thư mục con v...
+    if let Ok(entries) = std::fs::read_dir(buffers_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
+                    for sub_entry in sub_entries.flatten() {
+                        if sub_entry.path().extension().and_then(|s| s.to_str()) == Some("csv") {
+                            shard_files.push(sub_entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sắp xếp file theo thời gian sửa đổi (cũ đến mới)
+    shard_files.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    // Nạp data
+    for path in shard_files {
+        if let Ok(file) = std::fs::File::open(&path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() == 3 {
+                    if let (Ok(value), Ok(policy)) =
+                        (parts[1].parse::<f32>(), parts[2].parse::<usize>())
+                    {
+                        items.push(SelfPlayItem {
+                            fen: parts[0].to_string(),
+                            value,
+                            policy,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Cắt bớt nếu vượt quá max_size (chỉ giữ lại phần mới nhất ở cuối)
+    if items.len() > max_size {
+        let excess = items.len() - max_size;
+        items.drain(0..excess);
+    }
+    items
+}
+
+// ==========================================================
 // 4. Main Unified Pipeline Loop
 // ==========================================================
 
@@ -330,45 +389,28 @@ fn main() {
 
     let num_iterations = 500;
     let games_per_iteration = 128;
+    // TỐI ƯU TỐC ĐỘ: BẠN ĐÃ YÊU CẦU KO ĐỔI THÀNH 16, GIỮ NGUYÊN 128
     let concurrent_games = 128;
     let batch_size = 128;
 
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
+    // --- SETUP SHARD DIRECTORY VÀ NẠP DATA ---
     let max_buffer_size = 300_000;
-    let mut initial_buffer: Vec<SelfPlayItem> = Vec::new();
-    let buffer_path = format!("{}/replay_buffer.csv", model_dir);
+    let buffers_dir = format!("{}/buffers", model_dir);
+    std::fs::create_dir_all(&buffers_dir).expect("Failed to create buffers directory");
 
-    if let Ok(file) = std::fs::File::open(&buffer_path) {
-        println!("Đang nạp data từ {}...", buffer_path);
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(|l| l.ok()) {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() == 3 {
-                if let (Ok(value), Ok(policy)) =
-                    (parts[1].parse::<f32>(), parts[2].parse::<usize>())
-                {
-                    initial_buffer.push(SelfPlayItem {
-                        fen: parts[0].to_string(),
-                        value,
-                        policy,
-                    });
-                }
-            }
-        }
-        println!(
-            "Đã nạp xong {} bản ghi vào Replay Buffer.",
-            initial_buffer.len()
-        );
-    }
+    println!("Đang quét và nạp dữ liệu từ các file Shard...");
+    let initial_buffer = load_all_shards(&buffers_dir, max_buffer_size);
+    println!(
+        "✅ Đã nạp xong {} bản ghi FEN vào Replay Buffer RAM.",
+        initial_buffer.len()
+    );
 
     let replay_buffer_arc = Arc::new(Mutex::new(initial_buffer));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&buffer_path)
-        .expect("Không thể mở replay buffer file");
-    let file_arc = Arc::new(Mutex::new(BufWriter::new(file)));
+
+    // Biến này theo dõi data được sinh ra bởi model version mấy
+    let mut current_playing_version = start_version;
 
     for iter in 1..=num_iterations {
         let version = start_version + iter;
@@ -395,25 +437,19 @@ fn main() {
                 for _ in 0..games_in_batch {
                     let tx = &eval_tx;
                     let rb_clone = Arc::clone(&replay_buffer_arc);
-                    let file_clone = Arc::clone(&file_arc);
                     let tt_clone = Arc::clone(&shared_tt);
                     let iter_records_clone = Arc::clone(&iter_records);
 
                     s.spawn(move || {
                         let records = play_game(tx, &tt_clone);
 
+                        // Đẩy vào RAM buffer để lấy mẫu Train
                         {
                             let mut rb = rb_clone.lock().unwrap();
                             rb.extend(records.clone());
                         }
 
-                        {
-                            let mut f = file_clone.lock().unwrap();
-                            for item in &records {
-                                let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
-                            }
-                        }
-
+                        // Gom vào iter_records để lát nữa đóng gói thành file Shard
                         {
                             let mut ir = iter_records_clone.lock().unwrap();
                             ir.extend(records);
@@ -422,30 +458,50 @@ fn main() {
                 }
             });
             println!();
-
-            {
-                let mut f = file_arc.lock().unwrap();
-                let _ = f.flush();
-            }
         }
 
         drop(eval_tx);
         drop(eval_queue);
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
+        // --- TỰ ĐỘNG LƯU SHARD CHO ITERATION NÀY ---
+        let ir_snapshot = {
+            let ir = iter_records.lock().unwrap();
+            ir.clone()
+        };
+
+        if !ir_snapshot.is_empty() {
+            // Tạo thư mục ứng với version của Model ĐÃ CHƠI
+            let current_v_dir = format!("{}/v{}", buffers_dir, current_playing_version);
+            std::fs::create_dir_all(&current_v_dir).unwrap();
+
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let shard_path = format!("{}/shard_iter{}_{}.csv", current_v_dir, iter, timestamp);
+
+            if let Ok(file) = std::fs::File::create(&shard_path) {
+                let mut writer = BufWriter::new(file);
+                for item in ir_snapshot.iter() {
+                    let _ = writeln!(writer, "{},{},{}", item.fen, item.value, item.policy);
+                }
+                let _ = writer.flush();
+                println!(
+                    "💾 Đã đóng gói và lưu {} FENs mới vào shard: {}",
+                    ir_snapshot.len(),
+                    shard_path
+                );
+            }
+        }
+
+        // --- CẮT TỈA BUFFER RAM (KHÔNG ĐỤNG TỚI Ổ CỨNG NỮA) ---
         {
             let mut rb = replay_buffer_arc.lock().unwrap();
             if rb.len() > max_buffer_size {
                 let excess = rb.len() - max_buffer_size;
                 rb.drain(0..excess);
-                println!("Đã cắt tỉa {} bản ghi cũ khỏi Replay Buffer.", excess);
-
-                let mut f = file_arc.lock().unwrap();
-                *f = BufWriter::new(std::fs::File::create(&buffer_path).unwrap());
-                for item in rb.iter() {
-                    let _ = writeln!(f, "{},{},{}", item.fen, item.value, item.policy);
-                }
-                let _ = f.flush();
+                println!("Đã cắt tỉa {} bản ghi cũ khỏi RAM Replay Buffer.", excess);
             }
         }
 
@@ -455,12 +511,12 @@ fn main() {
             rb.len()
         };
 
-        if current_buffer_size < 50_000 {
+        if current_buffer_size < 40_000 {
             println!(
-                "⏳ Replay Buffer hiện có {} FENs. Đang tích lũy chờ đạt mốc 50,000 FENs mới bắt đầu Train...",
+                "⏳ Replay Buffer hiện có {} FENs. Đang tích lũy chờ đạt mốc 40,000 FENs mới bắt đầu Train...",
                 current_buffer_size
             );
-            continue; // Bỏ qua bước train, quay lại vòng lặp iter mới để gen thêm ván cờ
+            continue;
         }
         // ----------------------------------------
 
@@ -549,6 +605,9 @@ fn main() {
         let result = training.launch(learner);
 
         model = result.model;
+
+        // BÂY GIỜ UPDATE CURRENT PLAYING VERSION THÀNH BẢN MỚI NHẤT
+        current_playing_version = version;
 
         // --- ĐOẠN CODE MỚI THÊM: TRÍCH XUẤT KẾT QUẢ VALIDATION ---
         use std::fs::File;
