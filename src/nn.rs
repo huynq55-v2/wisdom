@@ -237,6 +237,8 @@ pub struct XiangqiTrainingOutput<B: Backend> {
     pub loss: Tensor<B, 1>,
     pub pred_value: Tensor<B, 2>,
     pub targets_v: Tensor<B, 2>,
+    pub pred_policy: Tensor<B, 2>,
+    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
 }
 
 impl<B: Backend> burn::train::ItemLazy for XiangqiTrainingOutput<B> {
@@ -244,6 +246,12 @@ impl<B: Backend> burn::train::ItemLazy for XiangqiTrainingOutput<B> {
 
     fn sync(self) -> Self::ItemSync {
         self
+    }
+}
+
+impl<B: Backend> burn::train::metric::Adaptor<burn::train::metric::AccuracyInput<B>> for XiangqiTrainingOutput<B> {
+    fn adapt(&self) -> burn::train::metric::AccuracyInput<B> {
+        burn::train::metric::AccuracyInput::new(self.pred_policy.clone(), self.targets_p.clone())
     }
 }
 
@@ -285,6 +293,8 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
                 loss: loss.inner(),
                 pred_value: pred_value.inner(),
                 targets_v: batch.targets_v.inner(),
+                pred_policy: pred_policy.inner(),
+                targets_p: batch.targets_p.clone().inner(),
             },
         )
     }
@@ -315,6 +325,8 @@ impl<B: Backend> InferenceStep for XiangqiNet<B> {
             loss,
             pred_value,
             targets_v: batch.targets_v,
+            pred_policy,
+            targets_p: batch.targets_p,
         }
     }
 }

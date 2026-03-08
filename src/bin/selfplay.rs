@@ -261,7 +261,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
             .into_iter()
             .map(|(fen, search_val, _side, policy)| SelfPlayItem {
                 fen,
-                value: search_val * 0.5,
+                value: search_val * 0.05, // 0.9 * 0 (Draw) + 0.1 * search_val
                 policy,
             })
             .collect(),
@@ -271,7 +271,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
                 let z = if side == winning_color { 1.0 } else { -1.0 };
                 SelfPlayItem {
                     fen,
-                    value: search_val * 0.5 + z * 0.5,
+                    value: search_val * 0.05 + z * 0.95,
                     policy,
                 }
             })
@@ -524,6 +524,8 @@ fn main() {
 
         let training =
             SupervisedTraining::new(&iter_learner_dir, dataloader_train, dataloader_valid)
+                .metric_train_numeric(burn::train::metric::AccuracyMetric::new())
+                .metric_valid_numeric(burn::train::metric::AccuracyMetric::new())
                 .num_epochs(1)
                 .renderer(CliMetricsRenderer::new());
 
