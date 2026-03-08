@@ -329,9 +329,9 @@ fn main() {
     let mut model = config.init::<MyBackend>(&device).load_record(record);
 
     let num_iterations = 500;
-    let games_per_iteration = 64;
-    let concurrent_games = 64;
-    let batch_size = 64;
+    let games_per_iteration = 128;
+    let concurrent_games = 128;
+    let batch_size = 128;
 
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
@@ -449,6 +449,21 @@ fn main() {
             }
         }
 
+        // --- ĐOẠN CODE KIỂM TRA NGƯỠNG WARM-UP ---
+        let current_buffer_size = {
+            let rb = replay_buffer_arc.lock().unwrap();
+            rb.len()
+        };
+
+        if current_buffer_size < 50_000 {
+            println!(
+                "⏳ Replay Buffer hiện có {} FENs. Đang tích lũy chờ đạt mốc 25,000 FENs mới bắt đầu Train...",
+                current_buffer_size
+            );
+            continue; // Bỏ qua bước train, quay lại vòng lặp iter mới để gen thêm ván cờ
+        }
+        // ----------------------------------------
+
         let mut train_dataset = {
             let ir = iter_records.lock().unwrap();
             ir.clone()
@@ -461,7 +476,7 @@ fn main() {
         };
         rb_snapshot.shuffle(&mut rand::rng());
 
-        let samples_from_buffer = 25_000.min(rb_snapshot.len());
+        let samples_from_buffer = 50_000.min(rb_snapshot.len());
         train_dataset.extend_from_slice(&rb_snapshot[0..samples_from_buffer]);
 
         train_dataset.shuffle(&mut rand::rng());
@@ -482,14 +497,14 @@ fn main() {
         let batcher_valid = XiangqiBatcher::<MyBackend>::new(device.clone());
 
         let dataloader_train = DataLoaderBuilder::new(batcher_train)
-            .batch_size(128)
+            .batch_size(256)
             .shuffle(42)
             .num_workers(2)
             .set_device(device.clone())
             .build(RAMDataset { items: train_data });
 
         let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-            .batch_size(128)
+            .batch_size(256)
             .shuffle(42)
             .num_workers(2)
             .set_device(device.clone())
@@ -521,7 +536,7 @@ fn main() {
             AdamConfig::new()
                 .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
                 .init(),
-            ConstantLr::new(1e-4),
+            ConstantLr::new(5e-5),
         );
 
         let training =
