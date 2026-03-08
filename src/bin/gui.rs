@@ -196,6 +196,7 @@ fn draw_pieces(
     selected_sq: Option<usize>,
     legal_moves: &[Move],
     human_color: PieceColor,
+    font: Option<&Font>,
 ) {
     for row in 0..10 {
         for col in 0..9 {
@@ -227,22 +228,68 @@ fn draw_pieces(
                 draw_circle_lines(x, y, RADIUS, 2.0, WHITE);
 
                 let text = match piece.piece_type {
-                    PieceType::King => "K",
-                    PieceType::Advisor => "A",
-                    PieceType::Elephant => "B",
-                    PieceType::Horse => "N",
-                    PieceType::Rook => "R",
-                    PieceType::Cannon => "C",
-                    PieceType::Pawn => "P",
+                    PieceType::King => {
+                        if piece.color == PieceColor::Red {
+                            "帥"
+                        } else {
+                            "將"
+                        }
+                    }
+                    PieceType::Advisor => {
+                        if piece.color == PieceColor::Red {
+                            "仕"
+                        } else {
+                            "士"
+                        }
+                    }
+                    PieceType::Elephant => {
+                        if piece.color == PieceColor::Red {
+                            "相"
+                        } else {
+                            "象"
+                        }
+                    }
+                    PieceType::Horse => {
+                        if piece.color == PieceColor::Red {
+                            "傌"
+                        } else {
+                            "馬"
+                        }
+                    }
+                    PieceType::Rook => {
+                        if piece.color == PieceColor::Red {
+                            "俥"
+                        } else {
+                            "車"
+                        }
+                    }
+                    PieceType::Cannon => {
+                        if piece.color == PieceColor::Red {
+                            "炮"
+                        } else {
+                            "砲"
+                        }
+                    }
+                    PieceType::Pawn => {
+                        if piece.color == PieceColor::Red {
+                            "兵"
+                        } else {
+                            "卒"
+                        }
+                    }
                 };
 
-                let text_size = measure_text(text, None, 30, 1.0);
-                draw_text(
+                let text_size = measure_text(text, font, 30, 1.0);
+                draw_text_ex(
                     text,
                     x - text_size.width / 2.0,
                     y + text_size.height / 2.0,
-                    30.0,
-                    WHITE,
+                    TextParams {
+                        font,
+                        font_size: 30,
+                        color: WHITE,
+                        ..Default::default()
+                    },
                 );
             }
         }
@@ -283,6 +330,18 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Attempt to load custom font
+    let mut custom_font: Option<Font> = None;
+    match load_ttf_font("assets/font.ttf").await {
+        Ok(f) => {
+            println!("GUI: Successfully loaded assets/font.ttf");
+            custom_font = Some(f);
+        }
+        Err(_) => {
+            println!("GUI: Could not load assets/font.ttf, falling back to default. Characters might not render correctly.");
+        }
+    }
+
     // --- Game State ---
     let mut board = Board::new();
     board.set_initial_position();
@@ -391,7 +450,7 @@ async fn main() {
 
     loop {
         draw_board();
-        draw_pieces(&board, selected_sq, &legal_moves, human_color);
+        draw_pieces(&board, selected_sq, &legal_moves, human_color, custom_font.as_ref());
 
         // --- DRAW CONTROL PANEL ---
         let panel_x = 620.0;
