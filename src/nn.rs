@@ -255,6 +255,12 @@ impl<B: Backend> burn::train::metric::Adaptor<burn::train::metric::AccuracyInput
     }
 }
 
+impl<B: Backend> burn::train::metric::Adaptor<burn::train::metric::LossInput<B>> for XiangqiTrainingOutput<B> {
+    fn adapt(&self) -> burn::train::metric::LossInput<B> {
+        burn::train::metric::LossInput::new(self.loss.clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct XiangqiTrainingBatch<B: Backend> {
     pub inputs: Tensor<B, 4>,

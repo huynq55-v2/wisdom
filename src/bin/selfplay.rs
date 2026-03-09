@@ -614,7 +614,9 @@ fn main() {
             SupervisedTraining::new(&iter_learner_dir, dataloader_train, dataloader_valid)
                 .metric_train_numeric(burn::train::metric::AccuracyMetric::new())
                 .metric_valid_numeric(burn::train::metric::AccuracyMetric::new())
-                .num_epochs(1)
+                .metric_train_numeric(burn::train::metric::LossMetric::new())
+                .metric_valid_numeric(burn::train::metric::LossMetric::new())
+                .num_epochs(5)
                 .renderer(CliMetricsRenderer::new());
 
         let result = training.launch(learner);
