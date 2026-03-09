@@ -37,3 +37,7 @@ path = "src/bin/inspect.rs"
 [[bin]]
 name = "convert_mpk"
 path = "src/bin/convert_mpk.rs"
+
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
