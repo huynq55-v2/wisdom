@@ -257,7 +257,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         move_count += 1;
     }
 
-    let alpha = 0.2; // Tỷ lệ giữ lại giá trị Search
+    let alpha = 0.85; // Tỷ lệ giữ lại giá trị Search
 
     let final_items: Vec<SelfPlayItem> = match winner {
         None => game_records
@@ -418,9 +418,12 @@ fn main() {
         // --- ĐOẠN CODE KIỂM TRA WARM-UP LƯỢT ĐẦU ---
         let initial_buf_size = replay_buffer_arc.lock().unwrap().len();
         let skip_gen = iter == 1 && initial_buf_size >= 40_000;
-        
+
         if skip_gen {
-            println!("✅ Đã có sẵn {} FENs. Trực tiếp dùng data này để train version {}, thay vì gen data version 0...", initial_buf_size, version);
+            println!(
+                "✅ Đã có sẵn {} FENs. Trực tiếp dùng data này để train version {}, thay vì gen data version 0...",
+                initial_buf_size, version
+            );
         }
 
         let iter_records = Arc::new(Mutex::new(Vec::new()));
