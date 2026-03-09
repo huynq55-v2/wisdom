@@ -599,7 +599,7 @@ fn main() {
             .init::<MyAutodiffBackend>(&device)
             .load_record(record);
 
-        let iter_learner_dir = format!("{}/learner_version_{}", model_dir, version);
+        let iter_learner_dir = format!("{}/learner_current", model_dir);
 
         use burn::optim::lr_scheduler::constant::ConstantLr;
         let learner = Learner::new(
@@ -616,7 +616,7 @@ fn main() {
                 .metric_valid_numeric(burn::train::metric::AccuracyMetric::new())
                 .metric_train_numeric(burn::train::metric::LossMetric::new())
                 .metric_valid_numeric(burn::train::metric::LossMetric::new())
-                .num_epochs(5)
+                .num_epochs(1)
                 .renderer(CliMetricsRenderer::new());
 
         let result = training.launch(learner);
@@ -656,9 +656,6 @@ fn main() {
             version, final_loss, final_acc
         );
         // ----------------------------------------------------------
-
-        // BÂY GIỜ MỚI XÓA THƯ MỤC
-        let _ = std::fs::remove_dir_all(&iter_learner_dir);
 
         let final_mpk_path = format!("{}/xiangqi_net_version_{}", model_dir, version);
         model
