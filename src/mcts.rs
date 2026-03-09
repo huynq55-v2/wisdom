@@ -69,6 +69,7 @@ pub struct SearchMetrics {
     pub root_visits: u32,
     pub best_child_visits: u32,
     pub win_pct: f32,
+    pub eval: f32, // Q value in [-1, 1] from the OPPONENT's perspective (negate engine's Q)
     pub top_moves: Vec<(Move, u32, f32)>, // Move, visits, percentage
 }
 
@@ -311,11 +312,14 @@ impl MCTS {
         }
 
         let win_pct = ((best_child_q + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
+        // Negate Q so eval is from the OPPONENT's (player's) perspective
+        let eval = (-best_child_q).clamp(-1.0, 1.0);
 
         let metrics = SearchMetrics {
             root_visits,
             best_child_visits,
             win_pct,
+            eval,
             top_moves,
         };
 

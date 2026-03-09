@@ -1,6 +1,7 @@
 use macroquad::prelude::*;
 use wisdom::board::{Board, Color as PieceColor, HistoryEntry, PieceType, RepetitionResult};
 use wisdom::r#move::Move;
+use wisdom::ucci::parse_ucci_move;
 
 const SQUARE_SIZE: f32 = 60.0;
 const OFFSET_X: f32 = 50.0;
@@ -319,6 +320,54 @@ fn draw_button(text: &str, x: f32, y: f32, w: f32, h: f32, active: bool, color: 
     false
 }
 
+fn draw_eval_bar(eval: f32, x: f32, y: f32, w: f32, h: f32) {
+    // eval in [-1, 1]: -1 = losing badly, +1 = winning
+    // Bar background
+    draw_rectangle(x, y, w, h, DARKGRAY);
+    draw_rectangle_lines(x, y, w, h, 2.0, BLACK);
+
+    // Fill from center based on eval
+    let center_x = x + w / 2.0;
+    let fill_width = eval.abs() * (w / 2.0);
+
+    if eval >= 0.0 {
+        // Green for positive (good for player)
+        let green = Color::new(0.2, 0.8, 0.3, 1.0);
+        draw_rectangle(center_x, y + 2.0, fill_width, h - 4.0, green);
+    } else {
+        // Red for negative (bad for player)
+        let red = Color::new(0.9, 0.2, 0.2, 1.0);
+        draw_rectangle(center_x - fill_width, y + 2.0, fill_width, h - 4.0, red);
+    }
+
+    // Center line
+    draw_line(center_x, y, center_x, y + h, 2.0, WHITE);
+
+    // Eval text
+    let eval_text = format!("{:+.3}", eval);
+    let text_color = if eval >= 0.0 {
+        Color::new(0.1, 0.6, 0.1, 1.0)
+    } else {
+        Color::new(0.8, 0.1, 0.1, 1.0)
+    };
+    draw_text(&eval_text, x + w + 10.0, y + h / 2.0 + 5.0, 20.0, text_color);
+}
+
+/// Replays moves from startpos to rebuild board and history
+fn replay_moves_from_startpos(
+    board: &mut Board,
+    game_history: &mut Vec<HistoryEntry>,
+    moves_uci: &[String],
+) {
+    board.set_initial_position();
+    game_history.clear();
+    for move_str in moves_uci {
+        if let Some(m) = parse_ucci_move(board, move_str) {
+            apply_move_to_game(board, m, game_history);
+        }
+    }
+}
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "Wisdom Engine - Xiangqi (MCTS)".to_owned(),
@@ -360,6 +409,7 @@ async fn main() {
     let mut mcts_simulations: usize = 2000;
     let mut current_eval: Option<String> = Some("Ready".to_string());
     let mut engine_policy: Vec<String> = Vec::new();
+    let mut current_eval_score: Option<f32> = None; // MCTS eval in [-1, 1] from player's perspective
 
     // ENGINE SUBPROCESS
     use std::io::{BufRead, BufReader, Write};
@@ -380,7 +430,7 @@ async fn main() {
 
     // UCCI Protocol Message
     enum EngineMessage {
-        Info { text: String, policy: Vec<String> },
+        Info { text: String, policy: Vec<String>, eval: Option<f32> },
         BestMove(String),
     }
 
@@ -394,6 +444,7 @@ async fn main() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     let mut nodes = "";
                     let mut winpct = "";
+                    let mut eval_val: Option<f32> = None;
                     let mut pv = Vec::new();
 
                     let mut i = 1;
@@ -403,6 +454,9 @@ async fn main() {
                             i += 2;
                         } else if parts[i] == "winpct" && i + 1 < parts.len() {
                             winpct = parts[i + 1];
+                            i += 2;
+                        } else if parts[i] == "eval" && i + 1 < parts.len() {
+                            eval_val = parts[i + 1].parse::<f32>().ok();
                             i += 2;
                         } else if parts[i] == "pv" {
                             for j in (i + 1)..parts.len().min(i + 6) {
@@ -418,6 +472,7 @@ async fn main() {
                     let msg = EngineMessage::Info {
                         text: summary,
                         policy: pv,
+                        eval: eval_val,
                     };
                     tx.send(msg).unwrap_or(());
                 } else if line.starts_with("bestmove") {
@@ -460,7 +515,7 @@ async fn main() {
         py += 40.0;
 
         // Reset Button
-        if !is_engine_thinking && draw_button("Reset Game", panel_x, py, 200.0, 40.0, false, BLUE) {
+        if !is_engine_thinking && draw_button("Reset Game", panel_x, py, 95.0, 40.0, false, BLUE) {
             board.set_initial_position();
             game_history.clear();
             game_moves_uci.clear();
@@ -469,7 +524,28 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            current_eval_score = None;
             engine_policy.clear();
+        }
+
+        // Undo Button (only in Player vs Engine mode)
+        let can_undo = !is_engine_thinking
+            && game_mode == GameMode::EngineVsPlayer
+            && game_moves_uci.len() >= 2
+            && !game_over;
+        let undo_color = if can_undo { ORANGE } else { LIGHTGRAY };
+        if can_undo && draw_button("Undo", panel_x + 105.0, py, 95.0, 40.0, false, undo_color) {
+            // Pop last 2 moves (engine + player)
+            game_moves_uci.pop();
+            game_moves_uci.pop();
+            replay_moves_from_startpos(&mut board, &mut game_history, &game_moves_uci);
+            selected_sq = None;
+            legal_moves.clear();
+            current_eval = Some("Move undone".to_string());
+            current_eval_score = None;
+            engine_policy.clear();
+        } else if !can_undo {
+            draw_button("Undo", panel_x + 105.0, py, 95.0, 40.0, false, LIGHTGRAY);
         }
         py += 60.0;
 
@@ -496,6 +572,7 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            current_eval_score = None;
             engine_policy.clear();
         }
         py += 40.0;
@@ -519,6 +596,7 @@ async fn main() {
             game_over = false;
             game_over_message = "GAME OVER".into();
             current_eval = Some("Ready".to_string());
+            current_eval_score = None;
             engine_policy.clear();
         }
         py += 40.0;
@@ -547,6 +625,7 @@ async fn main() {
                 game_over = false;
                 game_over_message = "GAME OVER".into();
                 current_eval = Some("Ready".to_string());
+                current_eval_score = None;
             }
             if !is_engine_thinking
                 && draw_button(
@@ -568,6 +647,7 @@ async fn main() {
                 game_over = false;
                 game_over_message = "GAME OVER".into();
                 current_eval = Some("Ready".to_string());
+                current_eval_score = None;
             }
             py += 40.0;
         }
@@ -593,7 +673,15 @@ async fn main() {
         }
         py += 50.0;
 
-        // Eval Display
+        // Eval Bar Display
+        if let Some(eval_score) = current_eval_score {
+            draw_text("Player Eval:", panel_x, py, 20.0, BLACK);
+            py += 25.0;
+            draw_eval_bar(eval_score, panel_x, py, 160.0, 20.0);
+            py += 35.0;
+        }
+
+        // Eval Text Display
         if let Some(ref eval_str) = current_eval {
             draw_text(eval_str, panel_x, py, 22.0, DARKGREEN);
             py += 30.0;
@@ -615,10 +703,13 @@ async fn main() {
         // Non-blocking wait for Engine reply
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                EngineMessage::Info { text, policy } => {
+                EngineMessage::Info { text, policy, eval } => {
                     current_eval = Some(text);
                     if !policy.is_empty() {
                         engine_policy = policy;
+                    }
+                    if let Some(e) = eval {
+                        current_eval_score = Some(e);
                     }
                 }
                 EngineMessage::BestMove(move_str) => {

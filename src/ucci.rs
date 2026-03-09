@@ -251,9 +251,10 @@ pub fn ucci_loop_generic<B: burn::prelude::Backend>(
                 }
 
                 println!(
-                    "info depth 0 nodes {} score winpct {:.1} pv {}",
+                    "info depth 0 nodes {} score winpct {:.1} eval {:.4} pv {}",
                     metrics.root_visits,
                     metrics.win_pct,
+                    metrics.eval,
                     pv_str.trim()
                 );
 

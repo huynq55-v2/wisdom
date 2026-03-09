@@ -607,7 +607,7 @@ fn main() {
             AdamConfig::new()
                 .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
                 .init(),
-            ConstantLr::new(5e-5),
+            ConstantLr::new(1e-5),
         );
 
         let training =
@@ -637,12 +637,19 @@ fn main() {
         let get_last_value = |path: &str| -> Option<String> {
             let file = File::open(path).ok()?;
             let last_line = BufReader::new(file).lines().filter_map(|l| l.ok()).last()?;
-            // Phân tích cú pháp thô chuỗi JSON (vd: {"value": 0.015})
             let parts: Vec<&str> = last_line.split("\"value\":").collect();
             if parts.len() > 1 {
-                let val = parts[1].trim_matches(|c| c == ' ' || c == '}' || c == '\n');
-                // Nếu là accuracy, Burn hay lưu kiểu 0.4465 (nghĩa là 44.65%)
-                Some(val.to_string())
+                // Tách ngay tại dấu phẩy hoặc ngoặc nhọn để vứt bỏ các key JSON thừa phía sau
+                let val_str = parts[1].split(|c| c == ',' || c == '}').next()?.trim();
+
+                // Nếu là Accuracy, Burn lưu dưới dạng thập phân (ví dụ 0.1171), ta nhân 100 để in %
+                if path.contains("accuracy") {
+                    if let Ok(num) = val_str.parse::<f32>() {
+                        return Some(format!("{:.2}%", num * 100.0));
+                    }
+                }
+
+                Some(val_str.to_string())
             } else {
                 None
             }
