@@ -414,94 +414,106 @@ fn main() {
 
     for iter in 1..=num_iterations {
         let version = start_version + iter;
-        println!("============================================================");
-        println!(
-            " Version {} / {} - Generating Data (CPU-MCTS + GPU-NN Batched)",
-            version, num_iterations
-        );
-        println!("============================================================");
 
-        let eval_queue = EvalQueue::new(model.clone(), device.clone(), batch_size, 1);
-        let eval_tx = eval_queue.tx.clone();
+        // --- ĐOẠN CODE KIỂM TRA WARM-UP LƯỢT ĐẦU ---
+        let initial_buf_size = replay_buffer_arc.lock().unwrap().len();
+        let skip_gen = iter == 1 && initial_buf_size >= 40_000;
+        
+        if skip_gen {
+            println!("✅ Đã có sẵn {} FENs. Trực tiếp dùng data này để train version {}, thay vì gen data version 0...", initial_buf_size, version);
+        }
 
-        let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
         let iter_records = Arc::new(Mutex::new(Vec::new()));
 
-        for batch_idx in 0..total_batches {
-            let games_in_batch = std::cmp::min(
-                concurrent_games,
-                games_per_iteration - batch_idx * concurrent_games,
+        if !skip_gen {
+            println!("============================================================");
+            println!(
+                " Version {} / {} - Generating Data (CPU-MCTS + GPU-NN Batched)",
+                version, num_iterations
             );
+            println!("============================================================");
 
-            std::thread::scope(|s| {
-                for _ in 0..games_in_batch {
-                    let tx = &eval_tx;
-                    let rb_clone = Arc::clone(&replay_buffer_arc);
-                    let tt_clone = Arc::clone(&shared_tt);
-                    let iter_records_clone = Arc::clone(&iter_records);
+            let eval_queue = EvalQueue::new(model.clone(), device.clone(), batch_size, 1);
+            let eval_tx = eval_queue.tx.clone();
 
-                    s.spawn(move || {
-                        let records = play_game(tx, &tt_clone);
+            let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
 
-                        // Đẩy vào RAM buffer để lấy mẫu Train
-                        {
-                            let mut rb = rb_clone.lock().unwrap();
-                            rb.extend(records.clone());
-                        }
-
-                        // Gom vào iter_records để lát nữa đóng gói thành file Shard
-                        {
-                            let mut ir = iter_records_clone.lock().unwrap();
-                            ir.extend(records);
-                        }
-                    });
-                }
-            });
-            println!();
-        }
-
-        drop(eval_tx);
-        drop(eval_queue);
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-
-        // --- TỰ ĐỘNG LƯU SHARD CHO ITERATION NÀY ---
-        let ir_snapshot = {
-            let ir = iter_records.lock().unwrap();
-            ir.clone()
-        };
-
-        if !ir_snapshot.is_empty() {
-            // Tạo thư mục ứng với version của Model ĐÃ CHƠI
-            let current_v_dir = format!("{}/v{}", buffers_dir, current_playing_version);
-            std::fs::create_dir_all(&current_v_dir).unwrap();
-
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let shard_path = format!("{}/shard_iter{}_{}.csv", current_v_dir, iter, timestamp);
-
-            if let Ok(file) = std::fs::File::create(&shard_path) {
-                let mut writer = BufWriter::new(file);
-                for item in ir_snapshot.iter() {
-                    let _ = writeln!(writer, "{},{},{}", item.fen, item.value, item.policy);
-                }
-                let _ = writer.flush();
-                println!(
-                    "💾 Đã đóng gói và lưu {} FENs mới vào shard: {}",
-                    ir_snapshot.len(),
-                    shard_path
+            for batch_idx in 0..total_batches {
+                let games_in_batch = std::cmp::min(
+                    concurrent_games,
+                    games_per_iteration - batch_idx * concurrent_games,
                 );
-            }
-        }
 
-        // --- CẮT TỈA BUFFER RAM (KHÔNG ĐỤNG TỚI Ổ CỨNG NỮA) ---
-        {
-            let mut rb = replay_buffer_arc.lock().unwrap();
-            if rb.len() > max_buffer_size {
-                let excess = rb.len() - max_buffer_size;
-                rb.drain(0..excess);
-                println!("Đã cắt tỉa {} bản ghi cũ khỏi RAM Replay Buffer.", excess);
+                std::thread::scope(|s| {
+                    for _ in 0..games_in_batch {
+                        let tx = &eval_tx;
+                        let rb_clone = Arc::clone(&replay_buffer_arc);
+                        let tt_clone = Arc::clone(&shared_tt);
+                        let iter_records_clone = Arc::clone(&iter_records);
+
+                        s.spawn(move || {
+                            let records = play_game(tx, &tt_clone);
+
+                            // Đẩy vào RAM buffer để lấy mẫu Train
+                            {
+                                let mut rb = rb_clone.lock().unwrap();
+                                rb.extend(records.clone());
+                            }
+
+                            // Gom vào iter_records để lát nữa đóng gói thành file Shard
+                            {
+                                let mut ir = iter_records_clone.lock().unwrap();
+                                ir.extend(records);
+                            }
+                        });
+                    }
+                });
+                println!();
+            }
+
+            drop(eval_tx);
+            drop(eval_queue);
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+
+            // --- TỰ ĐỘNG LƯU SHARD CHO ITERATION NÀY ---
+            let ir_snapshot = {
+                let ir = iter_records.lock().unwrap();
+                ir.clone()
+            };
+
+            if !ir_snapshot.is_empty() {
+                // Tạo thư mục ứng với version của Model ĐÃ CHƠI
+                let current_v_dir = format!("{}/v{}", buffers_dir, current_playing_version);
+                std::fs::create_dir_all(&current_v_dir).unwrap();
+
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let shard_path = format!("{}/shard_iter{}_{}.csv", current_v_dir, iter, timestamp);
+
+                if let Ok(file) = std::fs::File::create(&shard_path) {
+                    let mut writer = BufWriter::new(file);
+                    for item in ir_snapshot.iter() {
+                        let _ = writeln!(writer, "{},{},{}", item.fen, item.value, item.policy);
+                    }
+                    let _ = writer.flush();
+                    println!(
+                        "💾 Đã đóng gói và lưu {} FENs mới vào shard: {}",
+                        ir_snapshot.len(),
+                        shard_path
+                    );
+                }
+            }
+
+            // --- CẮT TỈA BUFFER RAM (KHÔNG ĐỤNG TỚI Ổ CỨNG NỮA) ---
+            {
+                let mut rb = replay_buffer_arc.lock().unwrap();
+                if rb.len() > max_buffer_size {
+                    let excess = rb.len() - max_buffer_size;
+                    rb.drain(0..excess);
+                    println!("Đã cắt tỉa {} bản ghi cũ khỏi RAM Replay Buffer.", excess);
+                }
             }
         }
 
