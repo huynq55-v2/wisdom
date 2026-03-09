@@ -602,11 +602,15 @@ fn main() {
         let iter_learner_dir = format!("{}/learner_current", model_dir);
 
         use burn::optim::lr_scheduler::constant::ConstantLr;
+        use burn::grad_clipping::GradientClippingConfig;
         let learner = Learner::new(
             autodiff_model,
             AdamConfig::new()
                 .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
+                // BỌC THÉP CHO WEIGHTS: Kẹp gradient để không có bước nhảy nào quá lớn
+                .with_grad_clipping(Some(GradientClippingConfig::Value(1.0)))
                 .init(),
+            // KHỞI ĐỘNG RÙA BÒ: LR cực thấp để Adam không phá model
             ConstantLr::new(1e-5),
         );
 
