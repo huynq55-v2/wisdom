@@ -207,26 +207,6 @@ def train_model():
     # T_max phải tính dựa trên TỔNG số bước của toàn bộ quá trình (epochs)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train_loader), eta_min=1e-5)
 
-    # --- LOGIC RESUME QUAN TRỌNG Ở ĐÂY ---
-    # latest_ckpt = "/content/drive/MyDrive/wisdom_models/xiangqi_net_v3_python_latest.pth"
-    # start_epoch = 0
-    # if os.path.exists(latest_ckpt):
-    #     print(f"📂 Phát hiện checkpoint cũ, đang phục hồi trạng thái...")
-    #     checkpoint = torch.load(latest_ckpt, map_location=device)
-        
-    #     model.load_state_dict(checkpoint['model_state_dict'])
-    #     if 'optimizer_state_dict' in checkpoint:
-    #         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-    #     # Load scheduler để duy trì đúng đường cong giảm Learning Rate
-    #     if 'scheduler_state_dict' in checkpoint:
-    #         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            
-    #     start_epoch = checkpoint.get('epoch', 0)
-    #     print(f"✅ Đã load thành công. Tiếp tục từ Epoch {start_epoch + 1}")
-    # else:
-    #     print("🆕 Không tìm thấy checkpoint, bắt đầu train mới từ Epoch 1")
-
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss()
 

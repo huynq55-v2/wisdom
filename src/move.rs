@@ -61,6 +61,53 @@ impl Move {
     pub fn is_capture(&self) -> bool {
         (self.0 & (1 << 14)) != 0
     }
+
+    // 1. Lật tọa độ chuẩn hệ 0x88 (16x16)
+    pub fn flip_sq_0x88(sq: usize) -> usize {
+        let r = sq >> 4; // Tương đương sq / 16
+        let c = sq & 15; // Tương đương sq % 16
+
+        // Trong hệ 0x88, hàng là 0-9, cột là 0-8
+        let flipped_r = 9 - r;
+        let flipped_c = 8 - c;
+
+        (flipped_r << 4) | flipped_c // Ghép lại thành 0x88
+    }
+
+    // 2. Chuyển từ 0x88 sang Index 90 (0-89)
+    pub fn sq0x88_to_90(sq: usize) -> usize {
+        (sq >> 4) * 9 + (sq & 15)
+    }
+
+    // 3. Hàm tổng hợp: Move (0x88) -> Index (0..8099) có tính đến chuyện Lật
+    pub fn move_to_nn_index(m: Move, is_black: bool) -> usize {
+        let mut from_sq = m.from_sq() as usize;
+        let mut to_sq = m.to_sq() as usize;
+
+        if is_black {
+            from_sq = Self::flip_sq_0x88(from_sq);
+            to_sq = Self::flip_sq_0x88(to_sq);
+        }
+
+        let from90 = Self::sq0x88_to_90(from_sq);
+        let to90 = Self::sq0x88_to_90(to_sq);
+
+        from90 * 90 + to90
+    }
+
+    fn flip_sq90(sq90: usize) -> usize {
+        89 - sq90
+    }
+
+    fn flip_action_index(idx: usize) -> usize {
+        let from_sq90 = idx / 90;
+        let to_sq90 = idx % 90;
+
+        let flipped_sq90_from = Self::flip_sq90(from_sq90);
+        let flipped_sq90_to = Self::flip_sq90(to_sq90);
+
+        flipped_sq90_from * 90 + flipped_sq90_to
+    }
 }
 
 impl std::fmt::Debug for Move {

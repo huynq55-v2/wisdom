@@ -41,3 +41,7 @@ path = "src/bin/convert_mpk.rs"
 [[bin]]
 name = "arena"
 path = "src/bin/arena.rs"
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"

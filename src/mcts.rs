@@ -164,24 +164,15 @@ impl MCTS {
             let (val, opt_p) = rx.recv().unwrap();
             let p_full = opt_p.unwrap();
 
-            // Lọc ngay lập tức: Chỉ lấy các move hợp lệ nén vào p_sparse
             let sparse: Vec<(u16, f32)> = legal_moves
                 .iter()
                 .map(|m| {
-                    // 1 & 2: Xác định điểm bắt đầu và kết thúc (Lật nếu là quân Đen)
-                    let (from_sq, to_sq) = if current_side == Color::Black {
-                        (
-                            crate::nn::flip_square(m.from_sq() as usize),
-                            crate::nn::flip_square(m.to_sq() as usize),
-                        )
-                    } else {
-                        (m.from_sq() as usize, m.to_sq() as usize)
-                    };
+                    // Sử dụng hàm tổng hợp để lấy index chính xác trong Action Space 8100
+                    // Hàm này đã bao gồm: Lật tọa độ 0x88 -> Chuyển sang 90 -> Tính Index
+                    let nn_idx =
+                        crate::r#move::Move::move_to_nn_index(*m, current_side == Color::Black);
 
-                    // 3 & 4: Tính ra index dựa trên "nước đi đã lật"
-                    let from_sq90 = (from_sq / 16) * 9 + (from_sq % 16);
-                    let to_sq90 = (to_sq / 16) * 9 + (to_sq % 16);
-                    let nn_idx = from_sq90 * 90 + to_sq90;
+                    // Trả về tuple: (Mã nước đi gốc, xác suất tương ứng từ Policy Head)
                     (m.0, p_full[nn_idx])
                 })
                 .collect();
@@ -569,21 +560,11 @@ impl MCTS {
                     p_sparse = legal_moves
                         .iter()
                         .map(|m| {
-                            // 1. Lấy tọa độ gốc (0x88)
-                            let f_sq = m.from_sq() as usize;
-                            let t_sq = m.to_sq() as usize;
-
-                            // 2. Nếu là bên Đen đi, lật tọa độ để AI nhìn dưới góc nhìn "luôn đi dưới lên"
-                            let (f_perspective, t_perspective) = if current_side == Color::Black {
-                                (crate::nn::flip_square(f_sq), crate::nn::flip_square(t_sq))
-                            } else {
-                                (f_sq, t_sq)
-                            };
-
-                            // 3. Tra cứu index trong Action Space 8100
-                            let from_sq90 = (f_perspective / 16) * 9 + (f_perspective % 16);
-                            let to_sq90 = (t_perspective / 16) * 9 + (t_perspective % 16);
-                            let nn_idx = from_sq90 * 90 + to_sq90;
+                            // 1 & 2 & 3: Gom tất cả logic lấy tọa độ, lật (nếu là Đen) và tính Index 8100 vào một chỗ
+                            let nn_idx = crate::r#move::Move::move_to_nn_index(
+                                *m,
+                                current_side == Color::Black,
+                            );
 
                             // Trả về tuple (mã nước đi gốc của engine, xác suất từ NN)
                             (m.0, p_full[nn_idx])

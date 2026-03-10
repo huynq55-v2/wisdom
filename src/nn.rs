@@ -17,30 +17,6 @@ pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1260
 pub const ACTION_SPACE: usize = 8100; // ĐÃ TĂNG LÊN 8100 (90 x 90)
 
 // ============================================================
-// Action Mapping (8100 ACTION SPACE)
-// ============================================================
-
-/// Convert a Move to an Absolute Index (0..8099).
-pub fn move_to_index(m: crate::r#move::Move) -> usize {
-    let from_sq = m.from_sq() as usize;
-    let to_sq = m.to_sq() as usize;
-
-    let from_sq90 = (from_sq / 16) * 9 + (from_sq % 16);
-    let to_sq90 = (to_sq / 16) * 9 + (to_sq % 16);
-
-    from_sq90 * 90 + to_sq90
-}
-
-// Hàm hỗ trợ lật tọa độ trên bàn cờ 16x16 (0x88)
-pub fn flip_square(sq: usize) -> usize {
-    let r = sq / 16;
-    let c = sq % 16;
-    let flipped_r = 9 - r;
-    let flipped_c = 8 - c;
-    flipped_r * 16 + flipped_c
-}
-
-// ============================================================
 // Board → Tensor Conversion
 // ============================================================
 
@@ -249,18 +225,6 @@ impl<B: Backend> burn::train::ItemLazy for XiangqiTrainingOutput<B> {
     }
 }
 
-impl<B: Backend> burn::train::metric::Adaptor<burn::train::metric::AccuracyInput<B>> for XiangqiTrainingOutput<B> {
-    fn adapt(&self) -> burn::train::metric::AccuracyInput<B> {
-        burn::train::metric::AccuracyInput::new(self.pred_policy.clone(), self.targets_p.clone())
-    }
-}
-
-impl<B: Backend> burn::train::metric::Adaptor<burn::train::metric::LossInput<B>> for XiangqiTrainingOutput<B> {
-    fn adapt(&self) -> burn::train::metric::LossInput<B> {
-        burn::train::metric::LossInput::new(self.loss.clone())
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct XiangqiTrainingBatch<B: Backend> {
     pub inputs: Tensor<B, 4>,
@@ -278,6 +242,7 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
     ) -> TrainOutput<XiangqiTrainingOutput<B::InnerBackend>> {
         use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
 
+        let batch_size = batch.targets_p.dims()[0];
         let (pred_value, pred_policy) = self.forward(batch.inputs);
 
         let loss_v = MseLoss::new().forward(
@@ -290,7 +255,25 @@ impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
             .init(&batch.targets_p.device())
             .forward(pred_policy.clone(), batch.targets_p.clone());
 
-        let loss = loss_v + loss_p;
+        let loss = loss_v.clone() + loss_p.clone();
+
+        // 🔥 CHỐNG LỖI TENSOR BROADCASTING:
+        // Ép chặt cả 2 về dạng mảng 1 chiều [Batch_Size]
+        let predicted_1d = pred_policy.clone().argmax(1).reshape([batch_size]);
+        let targets_1d = batch.targets_p.clone().reshape([batch_size]);
+
+        let is_correct = predicted_1d.equal(targets_1d);
+
+        // Tính tổng số lượng đoán đúng
+        let correct_count: f32 = is_correct.into_data().convert::<f32>().iter::<f32>().sum();
+        let accuracy = (correct_count / batch_size as f32) * 100.0;
+
+        println!(
+            "🚀 [Train Batch] Acc: {:05.2}% | Loss P: {:.4} | Loss V: {:.4}",
+            accuracy,
+            loss_p.clone().into_scalar().to_f64(),
+            loss_v.clone().into_scalar().to_f64()
+        );
 
         TrainOutput::new(
             self,
@@ -313,6 +296,7 @@ impl<B: Backend> InferenceStep for XiangqiNet<B> {
     fn step(&self, batch: XiangqiTrainingBatch<B>) -> XiangqiTrainingOutput<B> {
         use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
 
+        let batch_size = batch.targets_p.dims()[0];
         let (pred_value, pred_policy) = self.forward(batch.inputs);
 
         let loss_v = MseLoss::new().forward(
@@ -325,7 +309,23 @@ impl<B: Backend> InferenceStep for XiangqiNet<B> {
             .init(&batch.targets_p.device())
             .forward(pred_policy.clone(), batch.targets_p.clone());
 
-        let loss = loss_v + loss_p;
+        let loss = loss_v.clone() + loss_p.clone();
+
+        // 🔥 CHỐNG LỖI TENSOR BROADCASTING TƯƠNG TỰ CHO VALIDATION
+        let predicted_1d = pred_policy.clone().argmax(1).reshape([batch_size]);
+        let targets_1d = batch.targets_p.clone().reshape([batch_size]);
+
+        let is_correct = predicted_1d.equal(targets_1d);
+
+        let correct_count: f32 = is_correct.into_data().convert::<f32>().iter::<f32>().sum();
+        let accuracy = (correct_count / batch_size as f32) * 100.0;
+
+        println!(
+            "🎯 [Valid Batch] Acc: {:05.2}% | Loss P: {:.4} | Loss V: {:.4}",
+            accuracy,
+            loss_p.clone().into_scalar().to_f64(),
+            loss_v.clone().into_scalar().to_f64()
+        );
 
         XiangqiTrainingOutput {
             loss,
