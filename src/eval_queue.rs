@@ -1,6 +1,6 @@
-use crate::nn::{BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiNet};
-use burn::prelude::*;
+use crate::nn::{ACTION_SPACE, BOARD_H, BOARD_W, NUM_PLANES, TENSOR_SIZE, XiangqiOnnx};
 use crossbeam_channel::{Sender, bounded};
+use ndarray::Array4;
 use std::thread;
 
 pub struct EvalRequest {
@@ -15,10 +15,9 @@ pub struct EvalQueue {
 
 impl EvalQueue {
     /// Spawns a background thread that listens for evaluation requests,
-    /// batches them, runs the CNN forward pass, and sends results back.
-    pub fn new<B: Backend>(
-        model: XiangqiNet<B>,
-        device: B::Device,
+    /// batches them, runs the ONNX forward pass, and sends results back.
+    pub fn new(
+        mut model: XiangqiOnnx, // 🎯 Đã thêm `mut` ở đây để sở hữu hoàn toàn
         batch_size: usize,
         timeout_ms: u64,
     ) -> Self {
@@ -58,36 +57,23 @@ impl EvalQueue {
                     continue;
                 }
 
-                // Load to tensor
-                let inputs = Tensor::<B, 1>::from_data(batch_inputs.as_slice(), &device).reshape([
-                    current_batch_size,
-                    NUM_PLANES,
-                    BOARD_H,
-                    BOARD_W,
-                ]);
+                // Chuyển mảng 1D flat thành Array4 của ndarray để nạp vào ONNX
+                let batch_array = Array4::from_shape_vec(
+                    (current_batch_size, NUM_PLANES, BOARD_H, BOARD_W),
+                    batch_inputs.clone(),
+                )
+                .expect("Kích thước dữ liệu mảng không khớp với Shape (Batch, 14, 10, 9)");
 
-                // Forward pass on GPU (value, policy_logits)
-                let (pred_value, pred_policy) = model.forward(inputs);
-
-                // Read values back
-                let values = pred_value.into_data().to_vec::<f32>().unwrap();
-
-                // Only copy policy from GPU if at least one request needs it
-                let any_needs_policy = requests.iter().any(|r| r.need_policy);
-                let policies = if any_needs_policy {
-                    Some(pred_policy.into_data().to_vec::<f32>().unwrap())
-                } else {
-                    drop(pred_policy); // Free GPU memory immediately
-                    None
-                };
+                // Gọi ONNX Model để tính toán (Vì model là mut nên gọi vô tư)
+                let (values, policies) = model.forward(batch_array);
 
                 // Dispatch results to waiting threads
                 for (i, req) in requests.drain(..).enumerate() {
                     let v = values[i];
                     let p = if req.need_policy {
-                        let start = i * crate::nn::ACTION_SPACE;
-                        let end = start + crate::nn::ACTION_SPACE;
-                        Some(policies.as_ref().unwrap()[start..end].to_vec())
+                        let start = i * ACTION_SPACE;
+                        let end = start + ACTION_SPACE;
+                        Some(policies[start..end].to_vec())
                     } else {
                         None
                     };

@@ -1,25 +1,19 @@
+use ndarray::Array4;
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
+
 use crate::board::{Board, Color, PieceType};
-use burn::prelude::*;
-use burn::record::{FullPrecisionSettings, Recorder};
-use burn::{
-    nn::{
-        BatchNorm, BatchNormConfig, Linear, LinearConfig, Relu,
-        conv::{Conv2d, Conv2dConfig},
-    },
-    record::NamedMpkFileRecorder,
-};
 
-/// Total input planes: 7 piece types × 2 colors = 14
-pub const NUM_PLANES: usize = 14;
-pub const BOARD_H: usize = 10;
+// ============================================================
+// CONSTANTS (Giữ lại để các file khác gọi)
+// ============================================================
 pub const BOARD_W: usize = 9;
-pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_H * BOARD_W; // 1260
-pub const ACTION_SPACE: usize = 8100; // ĐÃ TĂNG LÊN 8100 (90 x 90)
+pub const BOARD_H: usize = 10;
+pub const NUM_PLANES: usize = 14;
+pub const TENSOR_SIZE: usize = NUM_PLANES * BOARD_W * BOARD_H;
+pub const ACTION_SPACE: usize = 8100;
 
-// ============================================================
-// Board → Tensor Conversion
-// ============================================================
-
+// Hàm hỗ trợ chuyển FEN sang mảng 1D (Nếu bác đang dùng trong nn.rs thì giữ lại)
 pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
     let mut data = [0.0f32; TENSOR_SIZE];
     let is_black = board.side_to_move == Color::Black;
@@ -61,278 +55,46 @@ pub fn board_to_tensor(board: &Board) -> [f32; TENSOR_SIZE] {
 }
 
 // ============================================================
-// RESNET MODEL DEFINITION (Khớp 100% với train.py V3)
+// ONNX MODEL DEFINITION
 // ============================================================
-
-#[derive(Module, Debug)]
-pub struct ResBlock<B: Backend> {
-    conv1: Conv2d<B>,
-    bn1: BatchNorm<B>,
-    conv2: Conv2d<B>,
-    bn2: BatchNorm<B>,
-    relu: Relu,
+pub struct XiangqiOnnx {
+    session: Session,
 }
 
-impl<B: Backend> ResBlock<B> {
-    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        let residual = x.clone();
-        let out = self.conv1.forward(x);
-        let out = self.bn1.forward(out);
-        let out = self.relu.forward(out);
+impl XiangqiOnnx {
+    pub fn new(model_path: &str) -> Self {
+        let _ = ort::init().with_name("wisdom_onnx").commit();
+        let session = Session::builder()
+            .unwrap()
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .unwrap()
+            .commit_from_file(model_path)
+            .unwrap();
 
-        let out = self.conv2.forward(out);
-        let out = self.bn2.forward(out);
-
-        let out = out + residual; // Skip connection
-        self.relu.forward(out)
-    }
-}
-
-pub struct ResBlockConfig {
-    channels: usize,
-}
-
-impl ResBlockConfig {
-    pub fn new(channels: usize) -> Self {
-        Self { channels }
+        Self { session }
     }
 
-    pub fn init<B: Backend>(&self, device: &B::Device) -> ResBlock<B> {
-        ResBlock {
-            conv1: Conv2dConfig::new([self.channels, self.channels], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Same)
-                .with_bias(false)
-                .init(device),
-            bn1: BatchNormConfig::new(self.channels).init(device),
-            conv2: Conv2dConfig::new([self.channels, self.channels], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Same)
-                .with_bias(false)
-                .init(device),
-            bn2: BatchNormConfig::new(self.channels).init(device),
-            relu: Relu::new(),
-        }
-    }
-}
+    pub fn forward(&mut self, batch_array: Array4<f32>) -> (Vec<f32>, Vec<f32>) {
+        let input_tensor = ort::value::Tensor::from_array(batch_array).unwrap();
 
-#[derive(Module, Debug)]
-pub struct XiangqiNet<B: Backend> {
-    conv_input: Conv2d<B>,
-    bn_input: BatchNorm<B>,
-    res_blocks: Vec<ResBlock<B>>, // 15 ResBlocks
+        let outputs = self
+            .session
+            .run(ort::inputs![
+                "input" => input_tensor
+            ])
+            .expect("Lỗi chạy ONNX");
 
-    conv_policy: Conv2d<B>,
-    policy_head: Linear<B>,
+        let policy_output = outputs
+            .get("policy")
+            .unwrap()
+            .try_extract_tensor::<f32>()
+            .unwrap();
+        let value_output = outputs
+            .get("value")
+            .unwrap()
+            .try_extract_tensor::<f32>()
+            .unwrap();
 
-    fc1: Linear<B>,
-    value_head: Linear<B>,
-    relu: Relu,
-}
-
-#[derive(Config, Debug)]
-pub struct XiangqiNetConfig;
-
-impl XiangqiNetConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> XiangqiNet<B> {
-        let channels = 128;
-        let num_res_blocks = 8; // Tùy chỉnh số lượng blocks
-
-        let mut res_blocks = Vec::with_capacity(num_res_blocks);
-        for _ in 0..num_res_blocks {
-            res_blocks.push(ResBlockConfig::new(channels).init(device));
-        }
-
-        XiangqiNet {
-            conv_input: Conv2dConfig::new([NUM_PLANES, channels], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Same)
-                .with_bias(false)
-                .init(device),
-            bn_input: BatchNormConfig::new(channels).init(device),
-            res_blocks,
-
-            conv_policy: Conv2dConfig::new([channels, 2], [1, 1]).init(device),
-            // ACTION_SPACE BÂY GIỜ LÀ 8100
-            policy_head: LinearConfig::new(2 * BOARD_H * BOARD_W, ACTION_SPACE).init(device),
-
-            fc1: LinearConfig::new(channels, 64).init(device),
-            value_head: LinearConfig::new(64, 1).init(device),
-            relu: Relu::new(),
-        }
-    }
-
-    pub fn load_model<B: Backend>(&self, path: &str, device: &B::Device) -> XiangqiNet<B> {
-        let model = self.init::<B>(device);
-        let full_path = format!("{}.mpk", path);
-        println!("🧠 Đang nạp bộ não Native Mpk từ: {}", full_path);
-
-        let record = NamedMpkFileRecorder::<FullPrecisionSettings>::default()
-            .load(full_path.into(), device)
-            .expect("LỖI: Không nạp được file .mpk.");
-
-        model.load_record(record)
-    }
-}
-
-impl<B: Backend> XiangqiNet<B> {
-    pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 2>, Tensor<B, 2>) {
-        let batch_size = x.dims()[0];
-
-        let mut x = self.conv_input.forward(x);
-        x = self.bn_input.forward(x);
-        x = self.relu.forward(x);
-
-        for block in self.res_blocks.iter() {
-            x = block.forward(x);
-        }
-        let x_spatial = x;
-        let [_, channels, h, w] = x_spatial.dims();
-
-        let x_pol = self.conv_policy.forward(x_spatial.clone());
-        let x_pol = x_pol.reshape([batch_size, 2 * h * w]);
-        let logits_policy = self.policy_head.forward(x_pol);
-
-        let spatial = h * w;
-        let x_val = x_spatial.reshape([batch_size, channels, spatial]);
-        let x_val = x_val.mean_dim(2); // GAP
-        let x_val = x_val.reshape([batch_size, channels]);
-        let x_val = self.fc1.forward(x_val);
-        let x_val = self.relu.forward(x_val);
-        let value = self.value_head.forward(x_val).tanh();
-
-        (value, logits_policy)
-    }
-}
-
-// ============================================================
-// Training Support (for burn 0.20)
-// ============================================================
-
-use burn::train::{InferenceStep, TrainOutput, TrainStep};
-
-#[derive(Clone, Debug)]
-pub struct XiangqiTrainingOutput<B: Backend> {
-    pub loss: Tensor<B, 1>,
-    pub pred_value: Tensor<B, 2>,
-    pub targets_v: Tensor<B, 2>,
-    pub pred_policy: Tensor<B, 2>,
-    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
-}
-
-impl<B: Backend> burn::train::ItemLazy for XiangqiTrainingOutput<B> {
-    type ItemSync = Self;
-
-    fn sync(self) -> Self::ItemSync {
-        self
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct XiangqiTrainingBatch<B: Backend> {
-    pub inputs: Tensor<B, 4>,
-    pub targets_v: Tensor<B, 2>,
-    pub targets_p: Tensor<B, 1, burn::tensor::Int>,
-}
-
-impl<B: burn::tensor::backend::AutodiffBackend> TrainStep for XiangqiNet<B> {
-    type Input = XiangqiTrainingBatch<B>;
-    type Output = XiangqiTrainingOutput<B::InnerBackend>;
-
-    fn step(
-        &self,
-        batch: XiangqiTrainingBatch<B>,
-    ) -> TrainOutput<XiangqiTrainingOutput<B::InnerBackend>> {
-        use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
-
-        let batch_size = batch.targets_p.dims()[0];
-        let (pred_value, pred_policy) = self.forward(batch.inputs);
-
-        let loss_v = MseLoss::new().forward(
-            pred_value.clone(),
-            batch.targets_v.clone(),
-            burn::nn::loss::Reduction::Mean,
-        );
-
-        let loss_p = CrossEntropyLossConfig::new()
-            .init(&batch.targets_p.device())
-            .forward(pred_policy.clone(), batch.targets_p.clone());
-
-        let loss = loss_v.clone() + loss_p.clone();
-
-        // 🔥 CHỐNG LỖI TENSOR BROADCASTING:
-        // Ép chặt cả 2 về dạng mảng 1 chiều [Batch_Size]
-        let predicted_1d = pred_policy.clone().argmax(1).reshape([batch_size]);
-        let targets_1d = batch.targets_p.clone().reshape([batch_size]);
-
-        let is_correct = predicted_1d.equal(targets_1d);
-
-        // Tính tổng số lượng đoán đúng
-        let correct_count: f32 = is_correct.into_data().convert::<f32>().iter::<f32>().sum();
-        let accuracy = (correct_count / batch_size as f32) * 100.0;
-
-        println!(
-            "🚀 [Train Batch] Acc: {:05.2}% | Loss P: {:.4} | Loss V: {:.4}",
-            accuracy,
-            loss_p.clone().into_scalar().to_f64(),
-            loss_v.clone().into_scalar().to_f64()
-        );
-
-        TrainOutput::new(
-            self,
-            loss.backward(),
-            XiangqiTrainingOutput {
-                loss: loss.inner(),
-                pred_value: pred_value.inner(),
-                targets_v: batch.targets_v.inner(),
-                pred_policy: pred_policy.inner(),
-                targets_p: batch.targets_p.clone().inner(),
-            },
-        )
-    }
-}
-
-impl<B: Backend> InferenceStep for XiangqiNet<B> {
-    type Input = XiangqiTrainingBatch<B>;
-    type Output = XiangqiTrainingOutput<B>;
-
-    fn step(&self, batch: XiangqiTrainingBatch<B>) -> XiangqiTrainingOutput<B> {
-        use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
-
-        let batch_size = batch.targets_p.dims()[0];
-        let (pred_value, pred_policy) = self.forward(batch.inputs);
-
-        let loss_v = MseLoss::new().forward(
-            pred_value.clone(),
-            batch.targets_v.clone(),
-            burn::nn::loss::Reduction::Mean,
-        );
-
-        let loss_p = CrossEntropyLossConfig::new()
-            .init(&batch.targets_p.device())
-            .forward(pred_policy.clone(), batch.targets_p.clone());
-
-        let loss = loss_v.clone() + loss_p.clone();
-
-        // 🔥 CHỐNG LỖI TENSOR BROADCASTING TƯƠNG TỰ CHO VALIDATION
-        let predicted_1d = pred_policy.clone().argmax(1).reshape([batch_size]);
-        let targets_1d = batch.targets_p.clone().reshape([batch_size]);
-
-        let is_correct = predicted_1d.equal(targets_1d);
-
-        let correct_count: f32 = is_correct.into_data().convert::<f32>().iter::<f32>().sum();
-        let accuracy = (correct_count / batch_size as f32) * 100.0;
-
-        println!(
-            "🎯 [Valid Batch] Acc: {:05.2}% | Loss P: {:.4} | Loss V: {:.4}",
-            accuracy,
-            loss_p.clone().into_scalar().to_f64(),
-            loss_v.clone().into_scalar().to_f64()
-        );
-
-        XiangqiTrainingOutput {
-            loss,
-            pred_value,
-            targets_v: batch.targets_v,
-            pred_policy,
-            targets_p: batch.targets_p,
-        }
+        (value_output.1.to_vec(), policy_output.1.to_vec())
     }
 }

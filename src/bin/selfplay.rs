@@ -1,15 +1,15 @@
 use burn::backend::wgpu::WgpuDevice;
+use burn::module::AutodiffModule; // Thêm dòng này để dùng .valid()
 use burn::record::NamedMpkFileRecorder;
 use burn::{
     backend::{Autodiff, Wgpu},
     data::{
-        dataloader::{DataLoaderBuilder, batcher::Batcher},
+        dataloader::batcher::Batcher, // Đã bỏ DataLoader và Learner
         dataset::Dataset,
     },
-    optim::{AdamConfig, decay::WeightDecayConfig},
+    optim::{AdamConfig, GradientsParams, Optimizer, decay::WeightDecayConfig}, // Thêm Optimizer
     prelude::*,
-    record::Recorder, // BẮT BUỘC PHẢI IMPORT ĐỂ DÙNG HÀM .load()
-    train::{Learner, SupervisedTraining, renderer::CliMetricsRenderer},
+    record::Recorder,
 };
 use crossbeam_channel::Sender;
 use rand::RngExt;
@@ -18,6 +18,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use wisdom::board::{Board, Color, HistoryEntry, PieceType};
 use wisdom::eval_queue::{EvalQueue, EvalRequest};
 use wisdom::mcts::MCTS;
@@ -70,11 +72,9 @@ impl<B: Backend> XiangqiBatcher<B> {
 impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBatcher<B> {
     fn batch(&self, items: Vec<SelfPlayItem>, device: &B::Device) -> XiangqiTrainingBatch<B> {
         let batch_size = items.len();
-
         let mut inputs_flat = Vec::with_capacity(batch_size * TENSOR_SIZE);
         let mut targets_v_flat = Vec::with_capacity(batch_size);
         let mut targets_p_flat = Vec::with_capacity(batch_size);
-
         let mut rng = rand::rng();
 
         for item in items {
@@ -82,16 +82,13 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
             wisdom::ucci::parse_fen(&mut board, &item.fen);
             let mut tensor = board_to_tensor(&board);
 
-            // Lấy tọa độ gốc từ policy_idx trong Shard
             let from_dense = item.policy / 90;
             let to_dense = item.policy % 90;
-
             let mut from_r = from_dense / 9;
             let mut from_c = from_dense % 9;
             let mut to_r = to_dense / 9;
             let mut to_c = to_dense % 9;
 
-            // 1. LẬT PERSPECTIVE NẾU LÀ ĐEN
             if board.side_to_move == Color::Black {
                 from_r = 9 - from_r;
                 from_c = 8 - from_c;
@@ -99,9 +96,7 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
                 to_c = 8 - to_c;
             }
 
-            // 2. DATA AUGMENTATION: LẬT GƯƠNG NGANG
             if self.is_training && rng.random_bool(0.5) {
-                // Lật gương Tensor ngang
                 for plane in 0..14 {
                     for r in 0..10 {
                         for c in 0..4 {
@@ -111,12 +106,10 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
                         }
                     }
                 }
-                // Lật gương tọa độ Policy ngang
                 from_c = 8 - from_c;
                 to_c = 8 - to_c;
             }
 
-            // 3. ĐÓNG GÓI LẠI INDEX 8100
             let policy_idx = (from_r * 9 + from_c) * 90 + (to_r * 9 + to_c);
 
             inputs_flat.extend_from_slice(&tensor);
@@ -142,9 +135,48 @@ impl<B: Backend> Batcher<B, SelfPlayItem, XiangqiTrainingBatch<B>> for XiangqiBa
 }
 
 // ==========================================================
-// 3. Self-Play Logic
+// Hàm hỗ trợ Validation trực tiếp (Giống train.rs)
 // ==========================================================
+fn run_validation<B: Backend>(
+    model: &wisdom::nn::XiangqiNet<B>,
+    val_data: &[SelfPlayItem],
+    batch_size: usize,
+    device: &B::Device,
+) -> (f64, f64, f64) {
+    let batcher_val = XiangqiBatcher::<B>::new(device.clone(), false);
 
+    // Vì val_data được set đúng 256 mẫu, nó sẽ chỉ chạy đúng 1 Batch
+    let batch = batcher_val.batch(val_data.to_vec(), device);
+    let actual_batch_size = val_data.len();
+
+    let (pred_value, pred_policy) = model.forward(batch.inputs);
+
+    let loss_v = burn::nn::loss::MseLoss::new().forward(
+        pred_value,
+        batch.targets_v,
+        burn::nn::loss::Reduction::Mean,
+    );
+
+    let loss_p = burn::nn::loss::CrossEntropyLossConfig::new()
+        .init(&batch.targets_p.device())
+        .forward(pred_policy.clone(), batch.targets_p.clone());
+
+    let val_loss_v = loss_v.into_scalar().to_f64();
+    let val_loss_p = loss_p.into_scalar().to_f64();
+
+    let predicted = pred_policy.argmax(1).reshape([actual_batch_size]);
+    let targets = batch.targets_p.reshape([actual_batch_size]);
+    let is_correct = predicted.equal(targets);
+    let correct_count: f32 = is_correct.into_data().convert::<f32>().iter::<f32>().sum();
+
+    let val_accuracy = (correct_count as f64 / actual_batch_size as f64) * 100.0;
+
+    (val_loss_v, val_loss_p, val_accuracy)
+}
+
+// ==========================================================
+// 2. Self-Play Logic (Giữ nguyên)
+// ==========================================================
 fn get_all_legal_moves(board: &mut Board) -> Vec<wisdom::r#move::Move> {
     let mut all_moves = board.generate_captures();
     all_moves.append(&mut board.generate_quiets());
@@ -260,7 +292,7 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
         move_count += 1;
     }
 
-    let alpha = 0.85; // Tỷ lệ giữ lại giá trị Search
+    let alpha = 0.85;
 
     let final_items: Vec<SelfPlayItem> = match winner {
         None => game_records
@@ -287,14 +319,10 @@ fn play_game(eval_tx: &Sender<EvalRequest>, tt: &Arc<TranspositionTable>) -> Vec
     final_items
 }
 
-// ==========================================================
-// Hàm hỗ trợ nạp Shard từ ổ cứng vào RAM
-// ==========================================================
 fn load_all_shards(buffers_dir: &str, max_size: usize) -> Vec<SelfPlayItem> {
     let mut items = Vec::new();
     let mut shard_files: Vec<PathBuf> = Vec::new();
 
-    // Thu thập tất cả file shard từ các thư mục con v...
     if let Ok(entries) = std::fs::read_dir(buffers_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -309,14 +337,12 @@ fn load_all_shards(buffers_dir: &str, max_size: usize) -> Vec<SelfPlayItem> {
         }
     }
 
-    // Sắp xếp file theo thời gian sửa đổi (cũ đến mới)
     shard_files.sort_by_key(|path| {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
 
-    // Nạp data
     for path in shard_files {
         if let Ok(file) = std::fs::File::open(&path) {
             let reader = BufReader::new(file);
@@ -337,7 +363,6 @@ fn load_all_shards(buffers_dir: &str, max_size: usize) -> Vec<SelfPlayItem> {
         }
     }
 
-    // Cắt bớt nếu vượt quá max_size (chỉ giữ lại phần mới nhất ở cuối)
     if items.len() > max_size {
         let excess = items.len() - max_size;
         items.drain(0..excess);
@@ -360,7 +385,6 @@ fn main() {
 
     fs::create_dir_all(&buffers_dir).expect("Failed to create dirs");
 
-    // 1. TÌM VERSION MỚI NHẤT MỘT CÁCH GỌN GÀNG TỪ TÊN FILE
     let start_version = fs::read_dir(model_dir)
         .into_iter()
         .flatten()
@@ -386,14 +410,17 @@ fn main() {
         .load(checkpoint_path.clone().into(), &device)
         .expect("❌ Không tìm thấy base model!");
 
-    // Base Model (Dùng cho MCTS) - Đã mang sẵn giá trị BatchNorm
     let mut model = config.init::<MyBackend>(&device).load_record(record);
 
     let num_iterations = 500;
     let games_per_iteration = 128;
     let concurrent_games = 128;
-    let batch_size = 128;
     let max_buffer_size = 300_000;
+
+    // --- THÔNG SỐ TRAINING TÙY CHỈNH CỦA BÁC ---
+    let batch_size = 256;
+    let valid_interval = 20; // 🎯 BÁC SỬA SỐ n Ở ĐÂY (Valid sau mỗi n batch)
+    let lr_max = 1e-5; // LR ổn định cho Self-Play Fine-tuning
 
     let shared_tt = Arc::new(TranspositionTable::new(1024));
 
@@ -424,7 +451,11 @@ fn main() {
             );
             println!("============================================================");
 
-            let eval_queue = EvalQueue::new(model.clone(), device.clone(), batch_size, 1);
+            // Khởi tạo Model
+            let onnx_model = wisdom::nn::XiangqiOnnx::new("./wisdom_models/xiangqi_model.onnx");
+
+            // Khởi tạo Queue (Bỏ cái device đi)
+            let eval_queue = EvalQueue::new(onnx_model, batch_size, 1);
             let total_batches = (games_per_iteration + concurrent_games - 1) / concurrent_games;
 
             for batch_idx in 0..total_batches {
@@ -448,7 +479,6 @@ fn main() {
                 });
             }
 
-            // Lưu Shard
             let ir_snapshot = iter_records.lock().unwrap().clone();
             if !ir_snapshot.is_empty() {
                 let current_v_dir = format!("{}/v{}", buffers_dir, current_playing_version);
@@ -468,7 +498,6 @@ fn main() {
                 }
             }
 
-            // Cắt tỉa RAM
             let mut rb = replay_buffer_arc.lock().unwrap();
             if rb.len() > max_buffer_size {
                 let excess = rb.len() - max_buffer_size;
@@ -485,7 +514,9 @@ fn main() {
             continue;
         }
 
-        // --- CHUẨN BỊ DỮ LIỆU TRAIN & VALID ---
+        // ==========================================================
+        // KHÂU CHUẨN BỊ DỮ LIỆU & TRAINING LOOP (VIẾT LẠI MỚI)
+        // ==========================================================
         use rand::seq::SliceRandom;
         let mut train_dataset = iter_records.lock().unwrap().clone();
         let mut rb_snapshot = replay_buffer_arc.lock().unwrap().clone();
@@ -493,32 +524,19 @@ fn main() {
         train_dataset.extend_from_slice(&rb_snapshot[0..50_000.min(rb_snapshot.len())]);
         train_dataset.shuffle(&mut rand::rng());
 
+        // 🎯 Cắt đúng 256 FEN cuối cùng làm Validation Set
+        let val_size = 256.min(train_dataset.len());
+        let train_size = train_dataset.len() - val_size;
+
+        let mut train_data = train_dataset[..train_size].to_vec();
+        let val_data = train_dataset[train_size..].to_vec();
+
         println!(
-            "\n🔥 Version {} - Training Model trên {} FENs",
-            version,
-            train_dataset.len()
+            "\n🔥 Version {} - Training trên {} FENs | Validation: {} FENs",
+            version, train_size, val_size
         );
 
-        let split_idx = (train_dataset.len() as f32 * 0.9) as usize;
-        let dataloader_train = DataLoaderBuilder::new(XiangqiBatcher::new(device.clone(), true))
-            .batch_size(1024)
-            .shuffle(42)
-            .num_workers(2)
-            .set_device(device.clone())
-            .build(RAMDataset {
-                items: train_dataset[0..split_idx].to_vec(),
-            });
-
-        let dataloader_valid = DataLoaderBuilder::new(XiangqiBatcher::new(device.clone(), false))
-            .batch_size(1024)
-            .shuffle(42)
-            .num_workers(2)
-            .set_device(device.clone())
-            .build(RAMDataset {
-                items: train_dataset[split_idx..].to_vec(),
-            });
-
-        // 🔥 TRẢ LẠI LOGIC "CÂY CẦU" TEMP FILE CỦA BÁC (Chuẩn và An toàn nhất)
+        // Chuyển Model qua nhánh Autodiff
         let temp_transfer_path = format!("{}/temp_transfer", model_dir);
         model
             .clone()
@@ -527,59 +545,117 @@ fn main() {
                 &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
             )
             .unwrap();
-
         let autodiff_record =
             NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default()
                 .load(temp_transfer_path.clone().into(), &device)
                 .unwrap();
-
-        let autodiff_model = config
+        let mut autodiff_model = config
             .init::<MyAutodiffBackend>(&device)
             .load_record(autodiff_record);
 
-        let iter_learner_dir = format!("{}/learner_current", model_dir);
+        // Setup Optimizer
+        use burn::nn::loss::{CrossEntropyLossConfig, MseLoss};
+        let optimizer_config =
+            AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(1e-4)));
+        let mut optimizer =
+            optimizer_config.init::<MyAutodiffBackend, wisdom::nn::XiangqiNet<MyAutodiffBackend>>();
 
-        use burn::grad_clipping::GradientClippingConfig;
-        use burn::optim::lr_scheduler::constant::ConstantLr;
+        let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+        let batcher_train = XiangqiBatcher::<MyAutodiffBackend>::new(device.clone(), true);
 
-        // 🔥 KHỞI TẠO ADAM TƯƠI MỚI & SỬA LEARNING RATE
-        let learner = Learner::new(
-            autodiff_model,
-            AdamConfig::new()
-                .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
-                .with_grad_clipping(Some(GradientClippingConfig::Value(1.0)))
-                .init(),
-            ConstantLr::new(5e-5),
-        );
+        let mut total_loss_v = 0.0f64;
+        let mut total_loss_p = 0.0f64;
+        let mut train_correct: usize = 0;
+        let mut train_samples: usize = 0;
 
-        // XÓA SẠCH CÁC METRIC CỦA BURN, CHỈ ĐỂ LẠI BỘ KHUNG TRAINING
-        let training =
-            SupervisedTraining::new(&iter_learner_dir, dataloader_train, dataloader_valid)
-                .num_epochs(1)
-                // Vẫn giữ Renderer để nó in ra thông báo Epoch
-                .renderer(CliMetricsRenderer::new());
+        println!("\n============================================================");
+        println!("▶️ BẮT ĐẦU TRAINING (Manual Loop)");
+        println!("============================================================\n");
 
-        // CHẠY TRAIN: Lúc này trên màn hình sẽ liên tục in ra các dòng "🚀 [Train Batch]" và "🎯 [Valid Batch]" do code tự viết ở nn.rs
-        println!("\n▶️ BẮT ĐẦU TRAIN (TỰ TÍNH LOG CHUẨN)...");
-        let trained_autodiff_model = training.launch(learner).model;
-        println!("⏹️ KẾT THÚC TRAIN.\n");
+        for batch_idx in 0..num_batches {
+            let start = batch_idx * batch_size;
+            let end = std::cmp::min(start + batch_size, train_data.len());
+            let batch_items = train_data[start..end].to_vec();
+            let actual_batch_size = batch_items.len();
 
-        // 🔥 CẬP NHẬT TRỌNG SỐ MỚI QUA CÂY CẦU TEMP FILE
-        trained_autodiff_model
+            let batch = batcher_train.batch(batch_items, &device);
+            let (pred_value, pred_policy) = autodiff_model.forward(batch.inputs);
+
+            let loss_v = MseLoss::new().forward(
+                pred_value.clone(),
+                batch.targets_v.clone(),
+                burn::nn::loss::Reduction::Mean,
+            );
+            let loss_p = CrossEntropyLossConfig::new()
+                .init(&batch.targets_p.device())
+                .forward(pred_policy.clone(), batch.targets_p.clone());
+            let loss = loss_v.clone() + loss_p.clone();
+
+            let predicted_1d = pred_policy.inner().argmax(1).reshape([actual_batch_size]);
+            let targets_1d = batch.targets_p.inner().reshape([actual_batch_size]);
+            let is_correct = predicted_1d.equal(targets_1d);
+
+            train_correct += is_correct
+                .into_data()
+                .convert::<f32>()
+                .iter::<f32>()
+                .sum::<f32>() as usize;
+            train_samples += actual_batch_size;
+            total_loss_v += loss_v.into_scalar().to_f64();
+            total_loss_p += loss_p.into_scalar().to_f64();
+
+            // Backward & Step
+            let grads = GradientsParams::from_grads(loss.backward(), &autodiff_model);
+            autodiff_model = optimizer.step(lr_max, autodiff_model, grads);
+
+            let is_last_batch = batch_idx == num_batches - 1;
+
+            // 🎯 KIỂM TRA VALIDATION SAU N BATCH
+            if (batch_idx + 1) % valid_interval == 0 || is_last_batch {
+                let val_model = autodiff_model.valid(); // Bóc Autodiff để chạy Valid
+                let (val_v, val_p, val_acc) =
+                    run_validation(&val_model, &val_data, batch_size, &device);
+
+                let avg_loss_v = total_loss_v / (batch_idx + 1) as f64;
+                let avg_loss_p = total_loss_p / (batch_idx + 1) as f64;
+                let running_acc = (train_correct as f64 / train_samples as f64) * 100.0;
+
+                print!(
+                    "\x1B[2K\r🔄 Model v{} | Batch {}/{} | LR: {:.6}\n   ↳ Train [Acc: {:05.2}% | P: {:.4} | V: {:.4}]\n   ↳ Valid [Acc: {:05.2}% | P: {:.4} | V: {:.4}]",
+                    version,
+                    batch_idx + 1,
+                    num_batches,
+                    lr_max,
+                    running_acc,
+                    avg_loss_p,
+                    avg_loss_v,
+                    val_acc,
+                    val_p,
+                    val_v
+                );
+                let _ = std::io::stdout().flush();
+
+                if !is_last_batch {
+                    print!("\x1B[2A"); // Giật lùi con trỏ lên 2 dòng
+                }
+            }
+        }
+
+        println!("\n\n⏹️ KẾT THÚC TRAIN.\n");
+
+        // CẬP NHẬT TRỌNG SỐ CHO BASE MODEL ĐỂ CHUẨN BỊ LẶP LẠI SELF-PLAY
+        autodiff_model
             .save_file(
                 &temp_transfer_path,
                 &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
             )
             .unwrap();
-
         let new_record = NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default()
             .load(temp_transfer_path.into(), &device)
             .unwrap();
 
         model = model.load_record(new_record);
         current_playing_version = version;
-
-        // XÓA TOÀN BỘ ĐOẠN read_log_metric VÀ IN TỔNG KẾT, VÌ CHÚNG TA ĐÃ IN TỪNG BATCH RỒI!
 
         let final_mpk_path = format!("{}/xiangqi_net_version_{}", model_dir, version);
         model
@@ -589,6 +665,6 @@ fn main() {
                 &NamedMpkFileRecorder::<burn::record::FullPrecisionSettings>::default(),
             )
             .unwrap();
-        println!("✅ Đã lưu Model Version {} thành công!", version);
+        println!("✅ Đã lưu Model Version {} thành công!\n", version);
     }
 }

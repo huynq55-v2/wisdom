@@ -154,18 +154,15 @@ fn apply_move_with_history(board: &mut Board, m: Move) -> HistoryEntry {
     }
 }
 
-pub fn ucci_loop_generic<B: burn::prelude::Backend>(
-    model: crate::nn::XiangqiNet<B>,
-    device: B::Device,
-) {
+pub fn ucci_loop(model: crate::nn::XiangqiOnnx) {
     let mut board = Board::new();
     board.set_initial_position();
     let mut game_history: Vec<HistoryEntry> = Vec::new();
 
-    let tt = crate::tt::TranspositionTable::new(64);
+    let tt = crate::tt::TranspositionTable::new(1024);
 
     // Start NN Eval Queue (automatically spawns background thread)
-    let eval_queue = EvalQueue::new(model, device, 64, 5);
+    let eval_queue = EvalQueue::new(model, 64, 5);
     // Store transmitter for MCTS
     let eval_tx = eval_queue.tx.clone();
 
